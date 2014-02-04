@@ -24,7 +24,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/coreos/raft"
+	"github.com/coreos/etcd/third_party/github.com/coreos/raft"
 
 	ehttp "github.com/coreos/etcd/http"
 	"github.com/coreos/etcd/log"
@@ -118,24 +118,24 @@ func main() {
 
 	// Calculate all of our timeouts
 	heartbeatTimeout := time.Duration(config.Peer.HeartbeatTimeout) * time.Millisecond
-	electionTimeout :=  time.Duration(config.Peer.ElectionTimeout) * time.Millisecond
+	electionTimeout := time.Duration(config.Peer.ElectionTimeout) * time.Millisecond
 	dialTimeout := (3 * heartbeatTimeout) + electionTimeout
 	responseHeaderTimeout := (3 * heartbeatTimeout) + electionTimeout
 
 	// Create peer server.
 	psConfig := server.PeerServerConfig{
-		Name:             info.Name,
-		Scheme:           peerTLSConfig.Scheme,
-		URL:              info.RaftURL,
-		SnapshotCount:    config.SnapshotCount,
-		MaxClusterSize:   config.MaxClusterSize,
-		RetryTimes:       config.MaxRetryAttempts,
+		Name:           info.Name,
+		Scheme:         peerTLSConfig.Scheme,
+		URL:            info.RaftURL,
+		SnapshotCount:  config.SnapshotCount,
+		MaxClusterSize: config.MaxClusterSize,
+		RetryTimes:     config.MaxRetryAttempts,
 	}
 	ps := server.NewPeerServer(psConfig, registry, store, &mb, followersStats, serverStats)
 
 	var psListener net.Listener
 	if psConfig.Scheme == "https" {
-		psListener, err = server.NewTLSListener(info.RaftListenHost, info.RaftTLS.CertFile, info.RaftTLS.KeyFile)
+		psListener, err = server.NewTLSListener(&tlsConfig.Server, info.RaftListenHost, info.RaftTLS.CertFile, info.RaftTLS.KeyFile)
 	} else {
 		psListener, err = server.NewListener(info.RaftListenHost)
 	}
@@ -165,7 +165,7 @@ func main() {
 
 	var sListener net.Listener
 	if tlsConfig.Scheme == "https" {
-		sListener, err = server.NewTLSListener(info.EtcdListenHost, info.EtcdTLS.CertFile, info.EtcdTLS.KeyFile)
+		sListener, err = server.NewTLSListener(&tlsConfig.Server, info.EtcdListenHost, info.EtcdTLS.CertFile, info.EtcdTLS.KeyFile)
 	} else {
 		sListener, err = server.NewListener(info.EtcdListenHost)
 	}
