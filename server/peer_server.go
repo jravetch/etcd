@@ -20,17 +20,16 @@ import (
 	"github.com/coreos/etcd/store"
 )
 
-const retryInterval = 10
-
 const ThresholdMonitorTimeout = 5 * time.Second
 
 type PeerServerConfig struct {
-	Name		string
-	Scheme		string
-	URL		string
-	SnapshotCount	int
-	MaxClusterSize	int
-	RetryTimes	int
+	Name           string
+	Scheme         string
+	URL            string
+	SnapshotCount  int
+	MaxClusterSize int
+	RetryTimes     int
+	RetryInterval  float64
 }
 
 type PeerServer struct {
@@ -92,7 +91,7 @@ func (s *PeerServer) SetRaftServer(raftServer raft.Server) {
 	raftServer.AddEventListener(raft.TermChangeEventType, s.raftEventLogger)
 	raftServer.AddEventListener(raft.AddPeerEventType, s.raftEventLogger)
 	raftServer.AddEventListener(raft.RemovePeerEventType, s.raftEventLogger)
-	raftServer.AddEventListener(raft.HeartbeatTimeoutEventType, s.raftEventLogger)
+	raftServer.AddEventListener(raft.HeartbeatIntervalEventType, s.raftEventLogger)
 	raftServer.AddEventListener(raft.ElectionTimeoutThresholdEventType, s.raftEventLogger)
 
 	raftServer.AddEventListener(raft.HeartbeatEventType, s.recordMetricEvent)
@@ -159,6 +158,7 @@ func (s *PeerServer) Stop() {
 		close(s.closeChan)
 		s.closeChan = nil
 	}
+	s.raftServer.Stop()
 }
 
 func (s *PeerServer) HTTPHandler() http.Handler {
@@ -209,8 +209,8 @@ func (s *PeerServer) startAsFollower(cluster []string) {
 		if ok {
 			return
 		}
-		log.Warnf("cannot join to cluster via given peers, retry in %d seconds", retryInterval)
-		time.Sleep(time.Second * retryInterval)
+		log.Warnf("Unable to join the cluster using any of the peers %v. Retrying in %.1f seconds", cluster, s.Config.RetryInterval)
+		time.Sleep(time.Second * time.Duration(s.Config.RetryInterval))
 	}
 
 	log.Fatalf("Cannot join the cluster via given peers after %x retries", s.Config.RetryTimes)
@@ -266,17 +266,18 @@ func (s *PeerServer) joinCluster(cluster []string) bool {
 
 		err := s.joinByPeer(s.raftServer, peer, s.Config.Scheme)
 		if err == nil {
-			log.Debugf("%s success join to the cluster via peer %s", s.Config.Name, peer)
+			log.Debugf("%s joined the cluster via peer %s", s.Config.Name, peer)
 			return true
 
-		} else {
-			if _, ok := err.(etcdErr.Error); ok {
-				log.Fatal(err)
-			}
-
-			log.Debugf("cannot join to cluster via peer %s %s", peer, err)
 		}
+
+		if _, ok := err.(etcdErr.Error); ok {
+			log.Fatal(err)
+		}
+
+		log.Warnf("Attempt to join via %s failed: %s", peer, err)
 	}
+
 	return false
 }
 
@@ -391,7 +392,7 @@ func (s *PeerServer) raftEventLogger(event raft.Event) {
 		log.Infof("%s: peer added: '%v'", s.Config.Name, value)
 	case raft.RemovePeerEventType:
 		log.Infof("%s: peer removed: '%v'", s.Config.Name, value)
-	case raft.HeartbeatTimeoutEventType:
+	case raft.HeartbeatIntervalEventType:
 		var name = "<unknown>"
 		if peer, ok := value.(*raft.Peer); ok {
 			name = peer.Name

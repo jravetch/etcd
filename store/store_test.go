@@ -115,6 +115,22 @@ func TestSet(t *testing.T) {
 	assert.Equal(t, e.PrevNode.Key, "/foo", "")
 	assert.Equal(t, e.PrevNode.Value, "", "")
 	assert.Equal(t, e.PrevNode.ModifiedIndex, uint64(1), "")
+	// Set /foo="baz" (for testing prevNode)
+	e, err = s.Set("/foo", false, "baz", Permanent)
+	assert.Nil(t, err, "")
+	assert.Equal(t, e.Action, "set", "")
+	assert.Equal(t, e.Node.Key, "/foo", "")
+	assert.False(t, e.Node.Dir, "")
+	assert.Equal(t, e.Node.Value, "baz", "")
+	assert.Nil(t, e.Node.Nodes, "")
+	assert.Nil(t, e.Node.Expiration, "")
+	assert.Equal(t, e.Node.TTL, 0, "")
+	assert.Equal(t, e.Node.ModifiedIndex, uint64(3), "")
+	// check prevNode
+	assert.NotNil(t, e.PrevNode, "")
+	assert.Equal(t, e.PrevNode.Key, "/foo", "")
+	assert.Equal(t, e.PrevNode.Value, "bar", "")
+	assert.Equal(t, e.PrevNode.ModifiedIndex, uint64(2), "")
 
 	// Set /dir as a directory
 	e, err = s.Set("/dir", true, "", Permanent)
@@ -126,7 +142,7 @@ func TestSet(t *testing.T) {
 	assert.Nil(t, e.Node.Nodes, "")
 	assert.Nil(t, e.Node.Expiration, "")
 	assert.Equal(t, e.Node.TTL, 0, "")
-	assert.Equal(t, e.Node.ModifiedIndex, uint64(3), "")
+	assert.Equal(t, e.Node.ModifiedIndex, uint64(4), "")
 }
 
 // Ensure that the store can create a new key if it doesn't already exist.
@@ -780,6 +796,18 @@ func TestStoreWatchExpireWithHiddenKey(t *testing.T) {
 	e = nbselect(c)
 	assert.Equal(t, e.Action, "expire", "")
 	assert.Equal(t, e.Node.Key, "/foofoo", "")
+}
+
+// Ensure that the store does see hidden key creates if watching deeper than a hidden key in recursive mode.
+func TestStoreWatchRecursiveCreateDeeperThanHiddenKey(t *testing.T) {
+	s := newStore()
+	w, _ := s.Watch("/_foo/bar", true, false, 0)
+	s.Create("/_foo/bar/baz", false, "baz", false, Permanent)
+
+	e := nbselect(w.EventChan)
+	assert.NotNil(t, e, "")
+	assert.Equal(t, e.Action, "create", "")
+	assert.Equal(t, e.Node.Key, "/_foo/bar/baz", "")
 }
 
 // Performs a non-blocking select on an event channel.

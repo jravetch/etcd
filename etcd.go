@@ -21,11 +21,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
 	"github.com/coreos/etcd/third_party/github.com/coreos/raft"
 
+	"github.com/coreos/etcd/config"
 	ehttp "github.com/coreos/etcd/http"
 	"github.com/coreos/etcd/log"
 	"github.com/coreos/etcd/metrics"
@@ -35,7 +37,7 @@ import (
 
 func main() {
 	// Load configuration.
-	var config = server.NewConfig()
+	var config = config.New()
 	if err := config.Load(os.Args[1:]); err != nil {
 		fmt.Println(server.Usage() + "\n")
 		fmt.Println(err.Error() + "\n")
@@ -71,20 +73,10 @@ func main() {
 		log.Fatalf("Unable to create path: %s", err)
 	}
 
-	// Load info object.
-	info, err := config.Info()
-	if err != nil {
-		log.Fatal("info:", err)
-	}
-
-	// Retrieve TLS configuration.
-	tlsConfig, err := info.EtcdTLS.Config()
-	if err != nil {
-		log.Fatal("Client TLS:", err)
-	}
-	peerTLSConfig, err := info.RaftTLS.Config()
-	if err != nil {
-		log.Fatal("Peer TLS:", err)
+	// Warn people if they have an info file
+	info := filepath.Join(config.DataDir, "info")
+	if _, err := os.Stat(info); err == nil {
+		log.Warnf("All cached configuration is now ignored. The file %s can be removed.", info)
 	}
 
 	var mbName string
@@ -113,8 +105,8 @@ func main() {
 	registry := server.NewRegistry(store)
 
 	// Create stats objects
-	followersStats := server.NewRaftFollowersStats(info.Name)
-	serverStats := server.NewRaftServerStats(info.Name)
+	followersStats := server.NewRaftFollowersStats(config.Name)
+	serverStats := server.NewRaftServerStats(config.Name)
 
 	// Calculate all of our timeouts
 	heartbeatTimeout := time.Duration(config.Peer.HeartbeatTimeout) * time.Millisecond
@@ -122,64 +114,83 @@ func main() {
 	dialTimeout := (3 * heartbeatTimeout) + electionTimeout
 	responseHeaderTimeout := (3 * heartbeatTimeout) + electionTimeout
 
-	// Create peer server.
+	// Create peer server
 	psConfig := server.PeerServerConfig{
-		Name:           info.Name,
-		Scheme:         peerTLSConfig.Scheme,
-		URL:            info.RaftURL,
+		Name:           config.Name,
+		Scheme:         config.PeerTLSInfo().Scheme(),
+		URL:            config.Peer.Addr,
 		SnapshotCount:  config.SnapshotCount,
 		MaxClusterSize: config.MaxClusterSize,
 		RetryTimes:     config.MaxRetryAttempts,
+		RetryInterval:  config.RetryInterval,
 	}
 	ps := server.NewPeerServer(psConfig, registry, store, &mb, followersStats, serverStats)
 
 	var psListener net.Listener
 	if psConfig.Scheme == "https" {
-		psListener, err = server.NewTLSListener(&tlsConfig.Server, info.RaftListenHost, info.RaftTLS.CertFile, info.RaftTLS.KeyFile)
+		peerServerTLSConfig, err := config.PeerTLSInfo().ServerConfig()
+		if err != nil {
+			log.Fatal("peer server TLS error: ", err)
+		}
+
+		psListener, err = server.NewTLSListener(config.Peer.BindAddr, peerServerTLSConfig)
+		if err != nil {
+			log.Fatal("Failed to create peer listener: ", err)
+		}
 	} else {
-		psListener, err = server.NewListener(info.RaftListenHost)
-	}
-	if err != nil {
-		panic(err)
+		psListener, err = server.NewListener(config.Peer.BindAddr)
+		if err != nil {
+			log.Fatal("Failed to create peer listener: ", err)
+		}
 	}
 
-	// Create Raft transporter and server
+	// Create raft transporter and server
 	raftTransporter := server.NewTransporter(followersStats, serverStats, registry, heartbeatTimeout, dialTimeout, responseHeaderTimeout)
 	if psConfig.Scheme == "https" {
-		raftTransporter.SetTLSConfig(peerTLSConfig.Client)
+		raftClientTLSConfig, err := config.PeerTLSInfo().ClientConfig()
+		if err != nil {
+			log.Fatal("raft client TLS error: ", err)
+		}
+		raftTransporter.SetTLSConfig(*raftClientTLSConfig)
 	}
-	raftServer, err := raft.NewServer(info.Name, config.DataDir, raftTransporter, store, ps, "")
+	raftServer, err := raft.NewServer(config.Name, config.DataDir, raftTransporter, store, ps, "")
 	if err != nil {
 		log.Fatal(err)
 	}
 	raftServer.SetElectionTimeout(electionTimeout)
-	raftServer.SetHeartbeatTimeout(heartbeatTimeout)
+	raftServer.SetHeartbeatInterval(heartbeatTimeout)
 	ps.SetRaftServer(raftServer)
 
-	// Create client server.
-	s := server.New(info.Name, info.EtcdURL, ps, registry, store, &mb)
+	// Create etcd server
+	s := server.New(config.Name, config.Addr, ps, registry, store, &mb)
 
 	if config.Trace() {
 		s.EnableTracing()
 	}
 
 	var sListener net.Listener
-	if tlsConfig.Scheme == "https" {
-		sListener, err = server.NewTLSListener(&tlsConfig.Server, info.EtcdListenHost, info.EtcdTLS.CertFile, info.EtcdTLS.KeyFile)
+	if config.EtcdTLSInfo().Scheme() == "https" {
+		etcdServerTLSConfig, err := config.EtcdTLSInfo().ServerConfig()
+		if err != nil {
+			log.Fatal("etcd TLS error: ", err)
+		}
+
+		sListener, err = server.NewTLSListener(config.BindAddr, etcdServerTLSConfig)
+		if err != nil {
+			log.Fatal("Failed to create TLS etcd listener: ", err)
+		}
 	} else {
-		sListener, err = server.NewListener(info.EtcdListenHost)
-	}
-	if err != nil {
-		panic(err)
+		sListener, err = server.NewListener(config.BindAddr)
+		if err != nil {
+			log.Fatal("Failed to create etcd listener: ", err)
+		}
 	}
 
 	ps.SetServer(s)
-
 	ps.Start(config.Snapshot, config.Peers)
 
-	// Run peer server in separate thread while the client server blocks.
 	go func() {
-		log.Infof("raft server [name %s, listen on %s, advertised url %s]", ps.Config.Name, psListener.Addr(), ps.Config.URL)
+		log.Infof("peer server [name %s, listen on %s, advertised url %s]", ps.Config.Name, psListener.Addr(), ps.Config.URL)
 		sHTTP := &ehttp.CORSHandler{ps.HTTPHandler(), corsInfo}
 		log.Fatal(http.Serve(psListener, sHTTP))
 	}()
