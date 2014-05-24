@@ -36,7 +36,7 @@ func TestV2GetKey(t *testing.T) {
 		node := body["node"].(map[string]interface{})
 		assert.Equal(t, node["key"], "/foo/bar", "")
 		assert.Equal(t, node["value"], "XXX", "")
-		assert.Equal(t, node["modifiedIndex"], 2, "")
+		assert.Equal(t, node["modifiedIndex"], 3, "")
 	})
 }
 
@@ -65,7 +65,7 @@ func TestV2GetKeyRecursively(t *testing.T) {
 		node := body["node"].(map[string]interface{})
 		assert.Equal(t, node["key"], "/foo", "")
 		assert.Equal(t, node["dir"], true, "")
-		assert.Equal(t, node["modifiedIndex"], 2, "")
+		assert.Equal(t, node["modifiedIndex"], 3, "")
 		assert.Equal(t, len(node["nodes"].([]interface{})), 2, "")
 
 		node0 := node["nodes"].([]interface{})[0].(map[string]interface{})
@@ -90,6 +90,13 @@ func TestV2GetKeyRecursively(t *testing.T) {
 //
 func TestV2WatchKey(t *testing.T) {
 	tests.RunServer(func(s *server.Server) {
+		// There exists a little gap between etcd ready to serve and
+		// it actually serves the first request, which means the response
+		// delay could be a little bigger.
+		// This test is time sensitive, so it does one request to ensure
+		// that the server is working.
+		tests.Get(fmt.Sprintf("%s%s", s.URL(), "/v2/keys/foo/bar"))
+
 		var watchResp *http.Response
 		c := make(chan bool)
 		go func() {
@@ -123,7 +130,7 @@ func TestV2WatchKey(t *testing.T) {
 		node := body["node"].(map[string]interface{})
 		assert.Equal(t, node["key"], "/foo/bar", "")
 		assert.Equal(t, node["value"], "XXX", "")
-		assert.Equal(t, node["modifiedIndex"], 2, "")
+		assert.Equal(t, node["modifiedIndex"], 3, "")
 	})
 }
 
@@ -138,7 +145,7 @@ func TestV2WatchKeyWithIndex(t *testing.T) {
 		var body map[string]interface{}
 		c := make(chan bool)
 		go func() {
-			resp, _ := tests.Get(fmt.Sprintf("%s%s", s.URL(), "/v2/keys/foo/bar?wait=true&waitIndex=3"))
+			resp, _ := tests.Get(fmt.Sprintf("%s%s", s.URL(), "/v2/keys/foo/bar?wait=true&waitIndex=4"))
 			body = tests.ReadBodyJSON(resp)
 			c <- true
 		}()
@@ -178,7 +185,7 @@ func TestV2WatchKeyWithIndex(t *testing.T) {
 		node := body["node"].(map[string]interface{})
 		assert.Equal(t, node["key"], "/foo/bar", "")
 		assert.Equal(t, node["value"], "YYY", "")
-		assert.Equal(t, node["modifiedIndex"], 3, "")
+		assert.Equal(t, node["modifiedIndex"], 4, "")
 	})
 }
 
@@ -227,5 +234,29 @@ func TestV2WatchKeyInDir(t *testing.T) {
 
 		node := body["node"].(map[string]interface{})
 		assert.Equal(t, node["key"], "/keyindir", "")
+	})
+}
+
+// Ensures that HEAD could work.
+//
+//   $ curl -I localhost:4001/v2/keys/foo/bar -> fail
+//   $ curl -X PUT localhost:4001/v2/keys/foo/bar -d value=XXX
+//   $ curl -I localhost:4001/v2/keys/foo/bar
+//
+func TestV2HeadKey(t *testing.T) {
+	tests.RunServer(func(s *server.Server) {
+		v := url.Values{}
+		v.Set("value", "XXX")
+		fullURL := fmt.Sprintf("%s%s", s.URL(), "/v2/keys/foo/bar")
+		resp, _ := tests.Head(fullURL)
+		assert.Equal(t, resp.StatusCode, http.StatusNotFound)
+		assert.Equal(t, resp.ContentLength, -1)
+
+		resp, _ = tests.PutForm(fullURL, v)
+		tests.ReadBody(resp)
+
+		resp, _ = tests.Head(fullURL)
+		assert.Equal(t, resp.StatusCode, http.StatusOK)
+		assert.Equal(t, resp.ContentLength, -1)
 	})
 }

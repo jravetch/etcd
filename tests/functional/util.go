@@ -19,13 +19,14 @@ package test
 import (
 	"errors"
 	"fmt"
-	"github.com/coreos/etcd/third_party/github.com/coreos/go-etcd/etcd"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/coreos/etcd/third_party/github.com/coreos/go-etcd/etcd"
 )
 
 var client = http.Client{
@@ -103,13 +104,13 @@ func CreateCluster(size int, procAttr *os.ProcAttr, ssl bool) ([][]string, []*os
 
 	for i := 0; i < size; i++ {
 		if i == 0 {
-			argGroup[i] = []string{"etcd", "-data-dir=/tmp/node1", "-name=node1"}
+			argGroup[i] = []string{"etcd", "-data-dir=/tmp/node1", "-name=node1", "-cluster-remove-delay=1800"}
 			if ssl {
 				argGroup[i] = append(argGroup[i], sslServer1...)
 			}
 		} else {
 			strI := strconv.Itoa(i + 1)
-			argGroup[i] = []string{"etcd", "-name=node" + strI, "-addr=127.0.0.1:400" + strI, "-peer-addr=127.0.0.1:700" + strI, "-data-dir=/tmp/node" + strI, "-peers=127.0.0.1:7001"}
+			argGroup[i] = []string{"etcd", "-name=node" + strI, fmt.Sprintf("-addr=127.0.0.1:%d", 4001+i), fmt.Sprintf("-peer-addr=127.0.0.1:%d", 7001+i), "-data-dir=/tmp/node" + strI, "-peers=127.0.0.1:7001", "-cluster-remove-delay=1800"}
 			if ssl {
 				argGroup[i] = append(argGroup[i], sslServer2...)
 			}
@@ -128,9 +129,19 @@ func CreateCluster(size int, procAttr *os.ProcAttr, ssl bool) ([][]string, []*os
 		// The problem is that if the master isn't up then the children
 		// have to retry. This retry can take upwards of 15 seconds
 		// which slows tests way down and some of them fail.
-		if i == 0 {
+		//
+		// Waiting for each server to start when ssl is a workaround.
+		// Autotest machines are dramatically slow, and it could spend
+		// several seconds to build TSL connections between servers. That
+		// is extremely terribe when the second machine joins the cluster
+		// because the cluster is out of work at this time. The guy
+		// tries to join during this time will fail, and current implementation
+		// makes it fail after just one-time try(bug in #661). This
+		// makes the cluster start with N-1 machines.
+		// TODO(yichengq): It should be fixed.
+		if i == 0 || ssl {
 			client := buildClient()
-			err = WaitForServer("127.0.0.1:4001", client, "http")
+			err = WaitForServer("127.0.0.1:400"+strconv.Itoa(i+1), client, "http")
 			if err != nil {
 				return nil, nil, err
 			}
@@ -143,6 +154,9 @@ func CreateCluster(size int, procAttr *os.ProcAttr, ssl bool) ([][]string, []*os
 // Destroy all the nodes in the cluster
 func DestroyCluster(etcds []*os.Process) error {
 	for _, etcd := range etcds {
+		if etcd == nil {
+			continue
+		}
 		err := etcd.Kill()
 		if err != nil {
 			panic(err.Error())
@@ -155,7 +169,7 @@ func DestroyCluster(etcds []*os.Process) error {
 //
 func Monitor(size int, allowDeadNum int, leaderChan chan string, all chan bool, stop chan bool) {
 	leaderMap := make(map[int]string)
-	baseAddrFormat := "http://0.0.0.0:400%d"
+	baseAddrFormat := "http://0.0.0.0:%d"
 
 	for {
 		knownLeader := "unknown"
@@ -163,7 +177,7 @@ func Monitor(size int, allowDeadNum int, leaderChan chan string, all chan bool, 
 		var i int
 
 		for i = 0; i < size; i++ {
-			leader, err := getLeader(fmt.Sprintf(baseAddrFormat, i+1))
+			leader, err := getLeader(fmt.Sprintf(baseAddrFormat, i+4001))
 
 			if err == nil {
 				leaderMap[i] = leader

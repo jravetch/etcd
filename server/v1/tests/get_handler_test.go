@@ -36,7 +36,7 @@ func TestV1GetKey(t *testing.T) {
 		assert.Equal(t, body["action"], "get", "")
 		assert.Equal(t, body["key"], "/foo/bar", "")
 		assert.Equal(t, body["value"], "XXX", "")
-		assert.Equal(t, body["index"], 2, "")
+		assert.Equal(t, body["index"], 3, "")
 	})
 }
 
@@ -85,6 +85,13 @@ func TestV1GetKeyDir(t *testing.T) {
 //
 func TestV1WatchKey(t *testing.T) {
 	tests.RunServer(func(s *server.Server) {
+		// There exists a little gap between etcd ready to serve and
+		// it actually serves the first request, which means the response
+		// delay could be a little bigger.
+		// This test is time sensitive, so it does one request to ensure
+		// that the server is working.
+		tests.Get(fmt.Sprintf("%s%s", s.URL(), "/v1/keys/foo/bar"))
+
 		var watchResp *http.Response
 		c := make(chan bool)
 		go func() {
@@ -117,7 +124,7 @@ func TestV1WatchKey(t *testing.T) {
 
 		assert.Equal(t, body["key"], "/foo/bar", "")
 		assert.Equal(t, body["value"], "XXX", "")
-		assert.Equal(t, body["index"], 2, "")
+		assert.Equal(t, body["index"], 3, "")
 	})
 }
 
@@ -133,7 +140,7 @@ func TestV1WatchKeyWithIndex(t *testing.T) {
 		c := make(chan bool)
 		go func() {
 			v := url.Values{}
-			v.Set("index", "3")
+			v.Set("index", "4")
 			resp, _ := tests.PostForm(fmt.Sprintf("%s%s", s.URL(), "/v1/watch/foo/bar"), v)
 			body = tests.ReadBodyJSON(resp)
 			c <- true
@@ -173,6 +180,30 @@ func TestV1WatchKeyWithIndex(t *testing.T) {
 
 		assert.Equal(t, body["key"], "/foo/bar", "")
 		assert.Equal(t, body["value"], "YYY", "")
-		assert.Equal(t, body["index"], 3, "")
+		assert.Equal(t, body["index"], 4, "")
+	})
+}
+
+// Ensures that HEAD works.
+//
+//   $ curl -I localhost:4001/v1/keys/foo/bar -> fail
+//   $ curl -X PUT localhost:4001/v1/keys/foo/bar -d value=XXX
+//   $ curl -I localhost:4001/v1/keys/foo/bar
+//
+func TestV1HeadKey(t *testing.T) {
+	tests.RunServer(func(s *server.Server) {
+		v := url.Values{}
+		v.Set("value", "XXX")
+		fullURL := fmt.Sprintf("%s%s", s.URL(), "/v1/keys/foo/bar")
+		resp, _ := tests.Get(fullURL)
+		assert.Equal(t, resp.StatusCode, http.StatusNotFound)
+		assert.Equal(t, resp.ContentLength, -1)
+
+		resp, _ = tests.PutForm(fullURL, v)
+		tests.ReadBody(resp)
+
+		resp, _ = tests.Get(fullURL)
+		assert.Equal(t, resp.StatusCode, http.StatusOK)
+		assert.Equal(t, resp.ContentLength, -1)
 	})
 }

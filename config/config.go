@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coreos/etcd/third_party/github.com/BurntSushi/toml"
 
@@ -61,7 +63,6 @@ type Config struct {
 	KeyFile          string   `toml:"key_file" env:"ETCD_KEY_FILE"`
 	Peers            []string `toml:"peers" env:"ETCD_PEERS"`
 	PeersFile        string   `toml:"peers_file" env:"ETCD_PEERS_FILE"`
-	MaxClusterSize   int      `toml:"max_cluster_size" env:"ETCD_MAX_CLUSTER_SIZE"`
 	MaxResultBuffer  int      `toml:"max_result_buffer" env:"ETCD_MAX_RESULT_BUFFER"`
 	MaxRetryAttempts int      `toml:"max_retry_attempts" env:"ETCD_MAX_RETRY_ATTEMPTS"`
 	RetryInterval    float64  `toml:"retry_interval" env:"ETCD_RETRY_INTERVAL"`
@@ -84,6 +85,11 @@ type Config struct {
 	}
 	strTrace     string `toml:"trace" env:"ETCD_TRACE"`
 	GraphiteHost string `toml:"graphite_host" env:"ETCD_GRAPHITE_HOST"`
+	Cluster      struct {
+		ActiveSize   int     `toml:"active_size" env:"ETCD_CLUSTER_ACTIVE_SIZE"`
+		RemoveDelay  float64 `toml:"remove_delay" env:"ETCD_CLUSTER_REMOVE_DELAY"`
+		SyncInterval float64 `toml:"sync_interval" env:"ETCD_CLUSTER_SYNC_INTERVAL"`
+	}
 }
 
 // New returns a Config initialized with default values.
@@ -91,7 +97,6 @@ func New() *Config {
 	c := new(Config)
 	c.SystemPath = DefaultSystemConfigPath
 	c.Addr = "127.0.0.1:4001"
-	c.MaxClusterSize = 9
 	c.MaxResultBuffer = 1024
 	c.MaxRetryAttempts = 3
 	c.RetryInterval = 10.0
@@ -100,6 +105,12 @@ func New() *Config {
 	c.Peer.Addr = "127.0.0.1:7001"
 	c.Peer.HeartbeatInterval = defaultHeartbeatInterval
 	c.Peer.ElectionTimeout = defaultElectionTimeout
+	rand.Seed(time.Now().UTC().UnixNano())
+	// Make maximum twice as minimum.
+	c.RetryInterval = float64(50+rand.Int()%50) * defaultHeartbeatInterval / 1000
+	c.Cluster.ActiveSize = server.DefaultActiveSize
+	c.Cluster.RemoveDelay = server.DefaultRemoveDelay
+	c.Cluster.SyncInterval = server.DefaultSyncInterval
 	return c
 }
 
@@ -139,16 +150,6 @@ func (c *Config) Load(arguments []string) error {
 		return err
 	}
 
-	// Sanitize all the input fields.
-	if err := c.Sanitize(); err != nil {
-		return fmt.Errorf("sanitize: %v", err)
-	}
-
-	// Force remove server configuration if specified.
-	if c.Force {
-		c.Reset()
-	}
-
 	return nil
 }
 
@@ -172,6 +173,9 @@ func (c *Config) LoadEnv() error {
 		return err
 	}
 	if err := c.loadEnv(&c.Peer); err != nil {
+		return err
+	}
+	if err := c.loadEnv(&c.Cluster); err != nil {
 		return err
 	}
 	return nil
@@ -203,6 +207,12 @@ func (c *Config) loadEnv(target interface{}) error {
 			value.Field(i).SetString(v)
 		case reflect.Slice:
 			value.Field(i).Set(reflect.ValueOf(ustrings.TrimSplit(v, ",")))
+		case reflect.Float64:
+			newValue, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return fmt.Errorf("Parse error: %s: %s", field.Tag.Get("env"), err)
+			}
+			value.Field(i).SetFloat(newValue)
 		}
 	}
 	return nil
@@ -248,7 +258,6 @@ func (c *Config) LoadFlags(arguments []string) error {
 	f.IntVar(&c.MaxResultBuffer, "max-result-buffer", c.MaxResultBuffer, "")
 	f.IntVar(&c.MaxRetryAttempts, "max-retry-attempts", c.MaxRetryAttempts, "")
 	f.Float64Var(&c.RetryInterval, "retry-interval", c.RetryInterval, "")
-	f.IntVar(&c.MaxClusterSize, "max-cluster-size", c.MaxClusterSize, "")
 	f.IntVar(&c.Peer.HeartbeatInterval, "peer-heartbeat-interval", c.Peer.HeartbeatInterval, "")
 	f.IntVar(&c.Peer.ElectionTimeout, "peer-election-timeout", c.Peer.ElectionTimeout, "")
 
@@ -260,6 +269,10 @@ func (c *Config) LoadFlags(arguments []string) error {
 
 	f.StringVar(&c.strTrace, "trace", "", "")
 	f.StringVar(&c.GraphiteHost, "graphite-host", "", "")
+
+	f.IntVar(&c.Cluster.ActiveSize, "cluster-active-size", c.Cluster.ActiveSize, "")
+	f.Float64Var(&c.Cluster.RemoveDelay, "cluster-remove-delay", c.Cluster.RemoveDelay, "")
+	f.Float64Var(&c.Cluster.SyncInterval, "cluster-sync-interval", c.Cluster.SyncInterval, "")
 
 	// BEGIN IGNORED FLAGS
 	f.StringVar(&path, "config", "", "")
@@ -282,7 +295,6 @@ func (c *Config) LoadFlags(arguments []string) error {
 	f.StringVar(&c.DataDir, "d", c.DataDir, "(deprecated)")
 	f.IntVar(&c.MaxResultBuffer, "m", c.MaxResultBuffer, "(deprecated)")
 	f.IntVar(&c.MaxRetryAttempts, "r", c.MaxRetryAttempts, "(deprecated)")
-	f.IntVar(&c.MaxClusterSize, "maxsize", c.MaxClusterSize, "(deprecated)")
 	f.IntVar(&c.SnapshotCount, "snapshotCount", c.SnapshotCount, "(deprecated)")
 	f.IntVar(&c.Peer.HeartbeatInterval, "peer-heartbeat-timeout", c.Peer.HeartbeatInterval, "(deprecated)")
 	// END DEPRECATED FLAGS
@@ -354,6 +366,9 @@ func (c *Config) Reset() error {
 	if err := os.RemoveAll(filepath.Join(c.DataDir, "snapshot")); err != nil {
 		return err
 	}
+	if err := os.RemoveAll(filepath.Join(c.DataDir, "standby_info")); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -361,18 +376,19 @@ func (c *Config) Reset() error {
 // Sanitize cleans the input fields.
 func (c *Config) Sanitize() error {
 	var err error
+	var url *url.URL
 
 	// Sanitize the URLs first.
-	if c.Addr, err = sanitizeURL(c.Addr, c.EtcdTLSInfo().Scheme()); err != nil {
+	if c.Addr, url, err = sanitizeURL(c.Addr, c.EtcdTLSInfo().Scheme()); err != nil {
 		return fmt.Errorf("Advertised URL: %s", err)
 	}
-	if c.BindAddr, err = sanitizeBindAddr(c.BindAddr, c.Addr); err != nil {
+	if c.BindAddr, err = sanitizeBindAddr(c.BindAddr, url); err != nil {
 		return fmt.Errorf("Listen Host: %s", err)
 	}
-	if c.Peer.Addr, err = sanitizeURL(c.Peer.Addr, c.PeerTLSInfo().Scheme()); err != nil {
+	if c.Peer.Addr, url, err = sanitizeURL(c.Peer.Addr, c.PeerTLSInfo().Scheme()); err != nil {
 		return fmt.Errorf("Peer Advertised URL: %s", err)
 	}
-	if c.Peer.BindAddr, err = sanitizeBindAddr(c.Peer.BindAddr, c.Peer.Addr); err != nil {
+	if c.Peer.BindAddr, err = sanitizeBindAddr(c.Peer.BindAddr, url); err != nil {
 		return fmt.Errorf("Peer Listen Host: %s", err)
 	}
 
@@ -418,37 +434,40 @@ func (c *Config) Trace() bool {
 	return c.strTrace == "*"
 }
 
+func (c *Config) ClusterConfig() *server.ClusterConfig {
+	return &server.ClusterConfig{
+		ActiveSize:   c.Cluster.ActiveSize,
+		RemoveDelay:  c.Cluster.RemoveDelay,
+		SyncInterval: c.Cluster.SyncInterval,
+	}
+}
+
 // sanitizeURL will cleanup a host string in the format hostname[:port] and
 // attach a schema.
-func sanitizeURL(host string, defaultScheme string) (string, error) {
+func sanitizeURL(host string, defaultScheme string) (string, *url.URL, error) {
 	// Blank URLs are fine input, just return it
 	if len(host) == 0 {
-		return host, nil
+		return host, &url.URL{}, nil
 	}
 
 	p, err := url.Parse(host)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	// Make sure the host is in Host:Port format
 	_, _, err = net.SplitHostPort(host)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	p = &url.URL{Host: host, Scheme: defaultScheme}
-	return p.String(), nil
+	return p.String(), p, nil
 }
 
 // sanitizeBindAddr cleans up the BindAddr parameter and appends a port
 // if necessary based on the advertised port.
-func sanitizeBindAddr(bindAddr string, addr string) (string, error) {
-	aurl, err := url.Parse(addr)
-	if err != nil {
-		return "", err
-	}
-
+func sanitizeBindAddr(bindAddr string, aurl *url.URL) (string, error) {
 	// If it is a valid host:port simply return with no further checks.
 	bhost, bport, err := net.SplitHostPort(bindAddr)
 	if err == nil && bhost != "" {

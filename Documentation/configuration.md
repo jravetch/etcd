@@ -38,6 +38,8 @@ configuration files.
 * `-peer-ca-file` - The path of the CAFile. Enables client/peer cert authentication when present.
 * `-peer-cert-file` - The cert file of the server.
 * `-peer-key-file` - The key file of the server.
+* `-peer-election-timeout` - The number of milliseconds to wait before the leader is declared unhealthy.
+* `-peer-heartbeat-interval` - The number of milliseconds in between heartbeat requests
 * `-snapshot=false` - Disable log snapshots. Defaults to `true`.
 * `-v` - Enable verbose logging. Defaults to `false`.
 * `-vv` - Enable very verbose logging. Defaults to `false`.
@@ -102,3 +104,4 @@ key_file = ""
  * `ETCD_PEER_CA_FILE`
  * `ETCD_PEER_CERT_FILE`
  * `ETCD_PEER_KEY_FILE`
+ * `ETCD_PEER_ELECTION_TIMEOUT`

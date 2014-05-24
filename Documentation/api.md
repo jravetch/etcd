@@ -118,7 +118,7 @@ curl -L http://127.0.0.1:4001/v2/keys/message -XPUT -d value="Hello etcd"
         "value": "Hello etcd"
     },
     "prevNode": {
-    	"createdIndex":2
+    	"createdIndex": 2
     	"key": "/message",
     	"value": "Hello world",
     	"modifiedIndex": 2,
@@ -199,6 +199,32 @@ If the TTL has expired, the key will have been deleted, and you will be returned
     "errorCode": 100,
     "index": 6,
     "message": "Key Not Found"
+}
+```
+
+The TTL could be unset to avoid expiration through update operation:
+
+```sh
+curl -L http://127.0.0.1:4001/v2/keys/foo -XPUT -d value=bar -d ttl= -d prevExist=true
+```
+
+```json
+{
+    "action": "update",
+    "node": {
+        "createdIndex": 5,
+        "key": "/foo",
+        "modifiedIndex": 6,
+        "value": "bar"
+    }
+    "prevNode": {
+        "createdIndex": 5,
+        "expiration": "2013-12-04T12:01:21.874888581-08:00",
+        "key": "/foo",
+        "modifiedIndex": 5,
+        "ttl": 3,
+        "value": "bar"
+    }
 }
 ```
 
@@ -378,11 +404,11 @@ curl 'http://127.0.0.1:4001/v2/keys/dir/asdf?consistent=true&wait=true'
 		"modifiedIndex": 15
 	},
 	"prevNode": {
-		"createdIndex":8,
+		"createdIndex": 8,
 		"key": "/dir",
 		"dir":true,
 		"modifiedIndex": 17,
-		"expiration":"2013-12-11T10:39:35.689275857-08:00"
+		"expiration": "2013-12-11T10:39:35.689275857-08:00"
 	},
 }
 ```
@@ -465,7 +491,7 @@ The response should be:
         "value": "two"
     },
     "prevNode": {
-    	"createdIndex":8,
+    	"createdIndex": 8,
     	"key": "/foo",
     	"modifiedIndex": 8,
     	"value": "one"
@@ -817,11 +843,13 @@ The client is told the write was successful and the keyspace is updated.
 Meanwhile F2 has partitioned from the network and will have an out-of-date version of the keyspace until the partition resolves.
 Since F2 missed the most recent write, a client reading from F2 will have an out-of-date version of the keyspace.
 
-## Lock Module
+## Lock Module (*Deprecated*)
 
 The lock module is used to serialize access to resources used by clients.
 Multiple clients can attempt to acquire a lock but only one can have it at a time.
 Once the lock is released, the next client waiting for the lock will receive it.
+
+**Warning:** This module is deprecated at v0.4. See [Modules][modules] for more details.
 
 
 ### Acquiring a Lock
@@ -903,7 +931,7 @@ If the TTL is not specified or is not a number then you'll receive the following
 When the client is finished with the lock, simply send a `DELETE` request to release the lock:
 
 ```sh
-curl -L http://127.0.0.1:4001/mod/v2/lock/mylock -XDELETE -d index=5
+curl -L http://127.0.0.1:4001/mod/v2/lock/mylock?index=5 -XDELETE
 ```
 
 If the index or value is not specified then you'll receive the following error:
@@ -953,7 +981,7 @@ Will return the current index:
 2
 ```
 
-If you specify a field other than `field` or `value` then you'll receive the following error:
+If you specify a field other than `index` or `value` then you'll receive the following error:
 
 ```json
 {
@@ -964,9 +992,12 @@ If you specify a field other than `field` or `value` then you'll receive the fol
 ```
 
 
-## Leader Module
+## Leader Module (*Deprecated*)
 
 The leader module wraps the lock module to provide a simple interface for electing a single leader in a cluster.
+
+**Warning:** This module is deprecated at v0.4. See [Modules][modules] for more details.
+[modules]: https://github.com/coreos/etcd/blob/master/Documentation/modules.md
 
 
 ### Setting the Leader
@@ -1120,7 +1151,7 @@ And this is an example response from a leader machine:
 curl -L http://127.0.0.1:4001/v2/stats/self
 ```
 
-```
+```json
 {
     "leaderInfo": {
         "leader": "machine0",
@@ -1165,4 +1196,96 @@ curl -L http://127.0.0.1:4001/v2/stats/store
     "updateSuccess": 0,
     "watchers": 0
 }
+```
+
+## Cluster Config
+
+The configuration endpoint manages shared cluster wide properties.
+
+### Set Cluster Config
+
+```sh
+curl -L http://127.0.0.1:7001/v2/admin/config -XPUT -d '{"activeSize":3, "removeDelay":1800,"syncInterval":5}'
+```
+
+```json
+{
+    "activeSize": 3,
+    "removeDelay": 1800,
+    "syncInterval":5
+}
+```
+
+`activeSize` is the maximum number of peers that can join the cluster and participate in the consensus protocol.
+
+The size of cluster is controlled to be around a certain number. If it is not, standby-mode instances will join or peer-mode instances will be removed to make it happen.
+
+`removeDelay` indicates the minimum time that a machine has been observed to be unresponsive before it is removed from the cluster.
+
+### Get Cluster Config
+
+```sh
+curl -L http://127.0.0.1:7001/v2/admin/config
+```
+
+```json
+{
+    "activeSize": 3,
+    "removeDelay": 1800,
+    "syncInterval":5
+}
+```
+
+## Remove Machines
+
+At times you may want to manually remove a machine. Using the machines endpoint
+you can find and remove machines.
+
+First, list all the machines in the cluster.
+
+```sh
+curl -L http://127.0.0.1:7001/v2/admin/machines
+```
+```json
+[
+    {
+        "clientURL": "http://127.0.0.1:4001",
+        "name": "peer1",
+        "peerURL": "http://127.0.0.1:7001",
+        "state": "leader"
+    },
+    {
+        "clientURL": "http://127.0.0.1:4002",
+        "name": "peer2",
+        "peerURL": "http://127.0.0.1:7002",
+        "state": "follower"
+    },
+    {
+        "clientURL": "http://127.0.0.1:4003",
+        "name": "peer3",
+        "peerURL": "http://127.0.0.1:7003",
+        "state": "follower"
+    }
+]
+```
+
+Then take a closer look at the machine you want to remove.
+
+```sh
+curl -L http://127.0.0.1:7001/v2/admin/machines/peer2
+```
+
+```json
+{
+    "clientURL": "http://127.0.0.1:4002",
+    "name": "peer2",
+    "peerURL": "http://127.0.0.1:7002",
+    "state": "follower"
+}
+```
+
+And finally remove it.
+
+```sh
+curl -L -XDELETE http://127.0.0.1:7001/v2/admin/machines/peer2
 ```
