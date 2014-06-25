@@ -1,6 +1,8 @@
 # Etcd Configuration
 
-Configuration options can be set in three places:
+## Node Configuration
+
+Individual node configuration options can be set in three places:
 
  1. Command line flags
  2. Environment variables
@@ -9,6 +11,16 @@ Configuration options can be set in three places:
 Options set on the command line take precedence over all other sources.
 Options set in environment variables take precedence over options set in
 configuration files.
+
+## Cluster Configuration
+
+Cluster-wide settings are configured via the `/config` admin endpoint and additionally in the configuration file. Values contained in the configuration file will seed the cluster setting with the provided value. After the cluster is running, only the admin endpoint is used.
+
+The full documentation is contained in the [API docs](https://github.com/coreos/etcd/blob/master/Documentation/api.md#cluster-config).
+
+* `activeSize` - the maximum number of peers that can participate in the consensus protocol. Other peers will join as standbys.
+* `removeDelay` - the minimum time in seconds that a machine has been observed to be unresponsive before it is removed from the cluster.
+* `syncInterval` - the amount of time in seconds between cluster sync when it runs in standby mode.
 
 ## Command Line Flags
 
@@ -41,6 +53,9 @@ configuration files.
 * `-peer-election-timeout` - The number of milliseconds to wait before the leader is declared unhealthy.
 * `-peer-heartbeat-interval` - The number of milliseconds in between heartbeat requests
 * `-snapshot=false` - Disable log snapshots. Defaults to `true`.
+* `-cluster-active-size` - The expected number of instances participating in the consensus protocol. Only applied if the etcd instance is the first peer in the cluster.
+* `-cluster-remove-delay` - The delay before one node is removed from the cluster since it cannot be connected at all. Only applied if the etcd instance is the first peer in the cluster.
+* `-cluster-sync-interval` - The interval between synchronization for standby-mode instance with the cluster. Only applied if the etcd instance is the first peer in the cluster.
 * `-v` - Enable verbose logging. Defaults to `false`.
 * `-vv` - Enable very verbose logging. Defaults to `false`.
 * `-version` - Print the version and exit.
@@ -76,6 +91,11 @@ bind_addr = "127.0.0.1:7001"
 ca_file = ""
 cert_file = ""
 key_file = ""
+
+[cluster]
+active_size = 9
+remove_delay = 1800.0
+sync_interval = 5.0
 ```
 
 ## Environment Variables
@@ -105,3 +125,6 @@ key_file = ""
  * `ETCD_PEER_CERT_FILE`
  * `ETCD_PEER_KEY_FILE`
  * `ETCD_PEER_ELECTION_TIMEOUT`
+ * `ETCD_CLUSTER_ACTIVE_SIZE`
+ * `ETCD_CLUSTER_REMOVE_DELAY`
+ * `ETCD_CLUSTER_SYNC_INTERVAL`
