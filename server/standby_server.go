@@ -30,6 +30,7 @@ type StandbyServerConfig struct {
 }
 
 type standbyInfo struct {
+	// stay running in standby mode
 	Running      bool
 	Cluster      []*machineMessage
 	SyncInterval float64
@@ -78,12 +79,16 @@ func (s *StandbyServer) Start() {
 	s.removeNotify = make(chan bool)
 	s.closeChan = make(chan bool)
 
+	s.Running = true
+	if err := s.saveInfo(); err != nil {
+		log.Warnf("error saving cluster info for standby")
+	}
+
 	s.routineGroup.Add(1)
 	go func() {
 		defer s.routineGroup.Done()
 		s.monitorCluster()
 	}()
-	s.Running = true
 }
 
 // Stop stops the server gracefully.
@@ -97,11 +102,6 @@ func (s *StandbyServer) Stop() {
 
 	close(s.closeChan)
 	s.routineGroup.Wait()
-
-	if err := s.saveInfo(); err != nil {
-		log.Warnf("error saving cluster info for standby")
-	}
-	s.Running = false
 }
 
 // RemoveNotify notifies the server is removed from standby mode and ready
@@ -178,13 +178,13 @@ func (s *StandbyServer) redirectRequests(w http.ResponseWriter, r *http.Request)
 // monitorCluster assumes that the machine has tried to join the cluster and
 // failed, so it waits for the interval at the beginning.
 func (s *StandbyServer) monitorCluster() {
+	ticker := time.NewTicker(time.Duration(int64(s.SyncInterval * float64(time.Second))))
+	defer ticker.Stop()
 	for {
-		timer := time.NewTimer(time.Duration(int64(s.SyncInterval * float64(time.Second))))
-		defer timer.Stop()
 		select {
 		case <-s.closeChan:
 			return
-		case <-timer.C:
+		case <-ticker.C:
 		}
 
 		if err := s.syncCluster(nil); err != nil {
@@ -204,6 +204,10 @@ func (s *StandbyServer) monitorCluster() {
 		}
 
 		log.Infof("join through leader %v", leader.PeerURL)
+		s.Running = false
+		if err := s.saveInfo(); err != nil {
+			log.Warnf("error saving cluster info for standby")
+		}
 		go func() {
 			s.Stop()
 			close(s.removeNotify)
