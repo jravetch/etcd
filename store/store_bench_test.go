@@ -1,17 +1,17 @@
 /*
-Copyright 2014 CoreOS Inc.
+   Copyright 2014 CoreOS, Inc.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
-     http://www.apache.org/licenses/LICENSE-2.0
+       http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 */
 
 package store
@@ -113,7 +113,7 @@ func BenchmarkWatch(b *testing.B) {
 
 		e := newEvent("set", kvs[i][0], uint64(i+1), uint64(i+1))
 		s.WatcherHub.notify(e)
-		<-w.EventChan
+		<-w.EventChan()
 		s.CurrentIndex++
 	}
 
@@ -135,7 +135,7 @@ func BenchmarkWatchWithSet(b *testing.B) {
 		w, _ := s.Watch(kvs[i][0], false, false, 0)
 
 		s.Set(kvs[i][0], false, "test", Permanent)
-		<-w.EventChan
+		<-w.EventChan()
 	}
 }
 
@@ -145,7 +145,7 @@ func BenchmarkWatchWithSetBatch(b *testing.B) {
 	kvs, _ := generateNRandomKV(b.N, 128)
 	b.StartTimer()
 
-	watchers := make([]*Watcher, b.N)
+	watchers := make([]Watcher, b.N)
 
 	for i := 0; i < b.N; i++ {
 		watchers[i], _ = s.Watch(kvs[i][0], false, false, 0)
@@ -156,14 +156,14 @@ func BenchmarkWatchWithSetBatch(b *testing.B) {
 	}
 
 	for i := 0; i < b.N; i++ {
-		<-watchers[i].EventChan
+		<-watchers[i].EventChan()
 	}
 
 }
 
 func BenchmarkWatchOneKey(b *testing.B) {
 	s := newStore()
-	watchers := make([]*Watcher, b.N)
+	watchers := make([]Watcher, b.N)
 
 	for i := 0; i < b.N; i++ {
 		watchers[i], _ = s.Watch("/foo", false, false, 0)
@@ -172,7 +172,7 @@ func BenchmarkWatchOneKey(b *testing.B) {
 	s.Set("/foo", false, "", Permanent)
 
 	for i := 0; i < b.N; i++ {
-		<-watchers[i].EventChan
+		<-watchers[i].EventChan()
 	}
 }
 

@@ -1,6 +1,16 @@
 # etcd
 
-README version 0.4.6
+[![Build Status](https://travis-ci.org/coreos/etcd.png?branch=master)](https://travis-ci.org/coreos/etcd)
+
+### WARNING ###
+
+The current `master` branch of etcd is under heavy development in anticipation of the forthcoming 0.5.0 release. 
+
+It is strongly recommended that users work with the latest 0.4.x release (0.4.6), which can be found on the [releases](https://github.com/coreos/etcd/releases) page.
+
+Unless otherwise noted, the etcd documentation refers to configuring and running 0.4.x releases.
+
+## README version 0.4.6
 
 A highly-available key value store for shared configuration and service discovery.
 etcd is inspired by [Apache ZooKeeper][zookeeper] and [doozer][doozer], with a focus on being:
@@ -30,30 +40,7 @@ The latest release and setup instructions are available at [GitHub][github-relea
 
 [github-release]: https://github.com/coreos/etcd/releases/
 
-
-### Building
-
-You can build etcd from source:
-
-```sh
-git clone https://github.com/coreos/etcd
-cd etcd
-./build
-```
-
-This will generate a binary called `./bin/etcd`.
-
-_NOTE_: you need go 1.2+. Please check your installation with
-
-```
-go version
-```
-
-See the [development tools documentation][development-tools] for alternative build methods like using Vagrant.
-
-[development-tools]: https://github.com/coreos/etcd/blob/master/Documentation/development-tools.md
-
-### Running
+### Running etcd
 
 First start a single-machine cluster of etcd:
 
@@ -96,7 +83,7 @@ You have successfully started an etcd on a single machine and written a key to t
 
 - Mailing list: [etcd-dev](https://groups.google.com/forum/?hl=en#!forum/etcd-dev)
 - IRC: #[coreos](irc://irc.freenode.org:6667/#coreos) on freenode.org
-- Planning/Roadmap: [milestones](https://github.com/coreos/etcd/issues/milestones)
+- Planning/Roadmap: [milestones](https://github.com/coreos/etcd/milestones)
 - Bugs: [issues](https://github.com/coreos/etcd/issues)
 
 ## Contributing
@@ -120,15 +107,17 @@ curl -L http://127.0.0.1:4001/version
 
 #### API Versioning
 
-Clients are encouraged to use the `v2` API. The `v1` API will not change.
-
 The `v2` API responses should not change after the 0.2.0 release but new features will be added over time.
+
+The `v1` API has been deprecated and will not be supported.
 
 During the pre-v1.0.0 series of releases we may break the API as we fix bugs and get feedback.
 
-#### 32bit systems
+#### 32-bit systems
 
-etcd has known issues on 32bit systems. We plan to address these issues after the 0.4 release.
+etcd has known issues on 32-bit systems due to a bug in the Go runtime. See #[358][358] for more information.
+
+[358]: https://github.com/coreos/etcd/issues/358
 
 ### License
 

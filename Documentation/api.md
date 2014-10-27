@@ -126,10 +126,10 @@ curl -L http://127.0.0.1:4001/v2/keys/message -XPUT -d value="Hello etcd"
         "value": "Hello etcd"
     },
     "prevNode": {
-    	"createdIndex": 2
+    	"createdIndex": 2,
     	"key": "/message",
     	"value": "Hello world",
-    	"modifiedIndex": 2,
+    	"modifiedIndex": 2
     }
 }
 ```
@@ -206,7 +206,7 @@ If the TTL has expired, the key will have been deleted, and you will be returned
     "cause": "/foo",
     "errorCode": 100,
     "index": 6,
-    "message": "Key Not Found"
+    "message": "Key not found"
 }
 ```
 
@@ -224,7 +224,7 @@ curl -L http://127.0.0.1:4001/v2/keys/foo -XPUT -d value=bar -d ttl= -d prevExis
         "key": "/foo",
         "modifiedIndex": 6,
         "value": "bar"
-    }
+    },
     "prevNode": {
         "createdIndex": 5,
         "expiration": "2013-12-04T12:01:21.874888581-08:00",
@@ -383,7 +383,7 @@ curl -L http://127.0.0.1:4001/v2/keys/dir -XPUT -d ttl=30 -d dir=true
         "createdIndex": 17,
         "dir": true,
         "expiration": "2013-12-11T10:37:33.689275857-08:00",
-        "key": "/newdir",
+        "key": "/dir",
         "modifiedIndex": 17,
         "ttl": 30
     }
@@ -417,7 +417,7 @@ curl 'http://127.0.0.1:4001/v2/keys/dir/asdf?consistent=true&wait=true'
 		"dir":true,
 		"modifiedIndex": 17,
 		"expiration": "2013-12-11T10:39:35.689275857-08:00"
-	},
+	}
 }
 ```
 
@@ -457,7 +457,7 @@ The error code explains the problem:
     "cause": "/foo",
     "errorCode": 105,
     "index": 39776,
-    "message": "Already exists"
+    "message": "Key already exists"
 }
 ```
 
@@ -474,7 +474,7 @@ This will try to compare the previous value of the key and the previous value we
     "cause": "[two != one]",
     "errorCode": 101,
     "index": 8,
-    "message": "Test Failed"
+    "message": "Compare failed"
 }
 ```
 
@@ -643,16 +643,22 @@ We should see the response as an array of items:
 ```json
 {
     "action": "get",
-    "node": {
-        "dir": true,
-        "key": "/",
-        "nodes": [
-            {
-                "createdIndex": 2,
-                "dir": true,
-                "key": "/foo_dir",
-                "modifiedIndex": 2
-            }
+    "node": {
+        "key": "/",
+        "dir": true,
+        "nodes": [
+            {
+                "key": "/foo_dir",
+                "dir": true,
+                "modifiedIndex": 2,
+                "createdIndex": 2
+            },
+            {
+                "key": "/foo",
+                "value": "two",
+                "modifiedIndex": 1,
+                "createdIndex": 1
+            }
         ]
     }
 }
@@ -667,27 +673,33 @@ curl -L http://127.0.0.1:4001/v2/keys/?recursive=true
 
 ```json
 {
-    "action": "get",
-    "node": {
-        "dir": true,
-        "key": "/",
-        "nodes": [
-            {
-                "createdIndex": 2,
-                "dir": true,
-                "key": "/foo_dir",
-                "modifiedIndex": 2,
-                "nodes": [
-                    {
-                        "createdIndex": 2,
-                        "key": "/foo_dir/foo",
-                        "modifiedIndex": 2,
-                        "value": "bar"
-                    }
-                ]
-            }
-        ]
-    }
+    "action": "get",
+    "node": {
+        "key": "/",
+        "dir": true,
+        "nodes": [
+            {
+                "key": "/foo_dir",
+                "dir": true,
+                "nodes": [
+                    {
+                        "key": "/foo_dir/foo",
+                        "value": "bar",
+                        "modifiedIndex": 2,
+                        "createdIndex": 2
+                    }
+                ],
+                "modifiedIndex": 2,
+                "createdIndex": 2
+            },
+            {
+                "key": "/foo",
+                "value": "two",
+                "modifiedIndex": 1,
+                "createdIndex": 1
+            }
+        ]
+    }
 }
 ```
 

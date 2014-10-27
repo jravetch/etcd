@@ -3,8 +3,10 @@
 **Tools**
 
 - [etcdctl](https://github.com/coreos/etcdctl) - A command line client for etcd
+- [etcd-backup](https://github.com/fanhattan/etcd-backup) - A powerful command line utility for dumping/restoring etcd - Supports v2
 - [etcd-dump](https://npmjs.org/package/etcd-dump) - Command line utility for dumping/restoring etcd.
 - [etcd-fs](https://github.com/xetorthio/etcd-fs) - FUSE filesystem for etcd
+- [etcd-browser](https://github.com/henszey/etcd-browser) - A web-based key/value editor for etcd using AngularJS
 
 **Go libraries**
 
@@ -12,8 +14,12 @@
 
 **Java libraries**
 
+
+- [boonproject/etcd](https://github.com/boonproject/boon/blob/master/etcd/README.md) - Supports v2, Async/Sync and waits
 - [justinsb/jetcd](https://github.com/justinsb/jetcd)
 - [diwakergupta/jetcd](https://github.com/diwakergupta/jetcd) - Supports v2
+- [jurmous/etcd4j](https://github.com/jurmous/etcd4j) - Supports v2
+- [AdoHe/etcd4j](http://github.com/AdoHe/etcd4j) - Supports v2 (enhance for real production cluster)
 
 **Python libraries**
 
@@ -35,6 +41,9 @@
 **C libraries**
 
 - [jdarcy/etcd-api](https://github.com/jdarcy/etcd-api) - Supports v2
+
+**C++ libraries**
+- [edwardcapriolo/etcdcpp](https://github.com/edwardcapriolo/etcdcpp) - Supports v2
 
 **Clojure libraries**
 

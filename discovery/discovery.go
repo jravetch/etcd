@@ -1,148 +1,276 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package discovery
 
 import (
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"net/url"
+	"os"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
-	etcdErr "github.com/coreos/etcd/error"
-	"github.com/coreos/etcd/log"
-	"github.com/coreos/etcd/third_party/github.com/coreos/go-etcd/etcd"
+	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/jonboulle/clockwork"
+	"github.com/coreos/etcd/client"
+)
+
+var (
+	ErrInvalidURL     = errors.New("discovery: invalid URL")
+	ErrBadSizeKey     = errors.New("discovery: size key is bad")
+	ErrSizeNotFound   = errors.New("discovery: size key not found")
+	ErrTokenNotFound  = errors.New("discovery: token not found")
+	ErrDuplicateID    = errors.New("discovery: found duplicate id")
+	ErrFullCluster    = errors.New("discovery: cluster is full")
+	ErrTooManyRetries = errors.New("discovery: too many retries")
 )
 
 const (
-	stateKey     = "_state"
-	startedState = "started"
-	defaultTTL   = 604800 // One week TTL
+	// Environment variable used to configure an HTTP proxy for discovery
+	DiscoveryProxyEnv = "ETCD_DISCOVERY_PROXY"
+	// Number of retries discovery will attempt before giving up and erroring out.
+	nRetries = uint(3)
 )
 
-type Discoverer struct {
-	client       *etcd.Client
-	name         string
-	peer         string
-	prefix       string
-	discoveryURL string
+type Discoverer interface {
+	Discover() (string, error)
 }
 
-var defaultDiscoverer *Discoverer
+type discovery struct {
+	cluster string
+	id      uint64
+	config  string
+	c       client.KeysAPI
+	retries uint
+	url     *url.URL
 
-func init() {
-	defaultDiscoverer = &Discoverer{}
+	clock clockwork.Clock
 }
 
-func (d *Discoverer) Do(discoveryURL string, name string, peer string, closeChan <-chan bool, startRoutine func(func())) (peers []string, err error) {
-	d.name = name
-	d.peer = peer
-	d.discoveryURL = discoveryURL
-
-	u, err := url.Parse(discoveryURL)
-
-	if err != nil {
-		return
-	}
-
-	// prefix is prepended to all keys for this discovery
-	d.prefix = strings.TrimPrefix(u.Path, "/v2/keys/")
-
-	// keep the old path in case we need to set the KeyPrefix below
-	oldPath := u.Path
-	u.Path = ""
-
-	// Connect to a scheme://host not a full URL with path
-	log.Infof("Discovery via %s using prefix %s.", u.String(), d.prefix)
-	d.client = etcd.NewClient([]string{u.String()})
-
-	if !strings.HasPrefix(oldPath, "/v2/keys") {
-		d.client.SetKeyPrefix("")
-	}
-
-	// Register this machine first and announce that we are a member of
-	// this cluster
-	err = d.heartbeat()
-	if err != nil {
-		return
-	}
-
-	// Start the very slow heartbeat to the cluster now in anticipation
-	// that everything is going to go alright now
-	startRoutine(func() { d.startHeartbeat(closeChan) })
-
-	// Attempt to take the leadership role, if there is no error we are it!
-	resp, err := d.client.Create(path.Join(d.prefix, stateKey), startedState, 0)
-
-	// Bail out on unexpected errors
-	if err != nil {
-		if clientErr, ok := err.(*etcd.EtcdError); !ok || clientErr.ErrorCode != etcdErr.EcodeNodeExist {
-			return nil, err
-		}
-	}
-
-	// If we got a response then the CAS was successful, we are leader
-	if resp != nil && resp.Node.Value == startedState {
-		// We are the leader, we have no peers
-		log.Infof("Discovery _state was empty, so this machine is the initial leader.")
+// proxyFuncFromEnv builds a proxy function if the appropriate environment
+// variable is set. It performs basic sanitization of the environment variable
+// and returns any error encountered.
+func proxyFuncFromEnv() (func(*http.Request) (*url.URL, error), error) {
+	proxy := os.Getenv(DiscoveryProxyEnv)
+	if proxy == "" {
 		return nil, nil
 	}
+	// Do a small amount of URL sanitization to help the user
+	// Derived from net/http.ProxyFromEnvironment
+	proxyURL, err := url.Parse(proxy)
+	if err != nil || !strings.HasPrefix(proxyURL.Scheme, "http") {
+		// proxy was bogus. Try prepending "http://" to it and
+		// see if that parses correctly. If not, we ignore the
+		// error and complain about the original one
+		var err2 error
+		proxyURL, err2 = url.Parse("http://" + proxy)
+		if err2 == nil {
+			err = nil
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy address %q: %v", proxy, err)
+	}
 
-	// Fall through to finding the other discovery peers
-	return d.findPeers()
+	log.Printf("discovery: using proxy %q", proxyURL.String())
+	return http.ProxyURL(proxyURL), nil
 }
 
-func (d *Discoverer) findPeers() (peers []string, err error) {
-	resp, err := d.client.Get(path.Join(d.prefix), false, true)
+func New(durl string, id uint64, config string) (Discoverer, error) {
+	u, err := url.Parse(durl)
 	if err != nil {
 		return nil, err
 	}
-
-	node := resp.Node
-
-	if node == nil {
-		return nil, fmt.Errorf("%s key doesn't exist.", d.prefix)
+	token := u.Path
+	u.Path = ""
+	pf, err := proxyFuncFromEnv()
+	if err != nil {
+		return nil, err
 	}
-
-	for _, n := range node.Nodes {
-		// Skip our own entry in the list, there is no point
-		if strings.HasSuffix(n.Key, "/"+d.name) {
-			continue
-		}
-		peers = append(peers, n.Value)
+	c, err := client.NewDiscoveryKeysAPI(&http.Transport{Proxy: pf}, u.String(), client.DefaultRequestTimeout)
+	if err != nil {
+		return nil, err
 	}
-
-	if len(peers) == 0 {
-		return nil, errors.New("Discovery found an initialized cluster but no reachable peers are registered.")
-	}
-
-	log.Infof("Discovery found peers %v", peers)
-
-	return
+	return &discovery{
+		cluster: token,
+		id:      id,
+		config:  config,
+		c:       c,
+		url:     u,
+		clock:   clockwork.NewRealClock(),
+	}, nil
 }
 
-func (d *Discoverer) startHeartbeat(closeChan <-chan bool) {
-	// In case of errors we should attempt to heartbeat fairly frequently
-	heartbeatInterval := defaultTTL / 8
-	ticker := time.NewTicker(time.Second * time.Duration(heartbeatInterval))
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			err := d.heartbeat()
-			if err != nil {
-				log.Warnf("Discovery heartbeat failed: %v", err)
-			}
-		case <-closeChan:
-			return
-		}
+func (d *discovery) Discover() (string, error) {
+	// fast path: if the cluster is full, returns the error
+	// do not need to register itself to the cluster in this
+	// case.
+	if _, _, err := d.checkCluster(); err != nil {
+		return "", err
 	}
+
+	if err := d.createSelf(); err != nil {
+		// Fails, even on a timeout, if createSelf times out.
+		// TODO(barakmich): Retrying the same node might want to succeed here
+		// (ie, createSelf should be idempotent for discovery).
+		return "", err
+	}
+
+	nodes, size, err := d.checkCluster()
+	if err != nil {
+		return "", err
+	}
+
+	all, err := d.waitNodes(nodes, size)
+	if err != nil {
+		return "", err
+	}
+
+	return nodesToCluster(all), nil
 }
 
-func (d *Discoverer) heartbeat() error {
-	_, err := d.client.Set(path.Join(d.prefix, d.name), d.peer, defaultTTL)
+func (d *discovery) createSelf() error {
+	resp, err := d.c.Create(d.selfKey(), d.config, -1)
+	if err != nil {
+		return err
+	}
+
+	// ensure self appears on the server we connected to
+	w := d.c.Watch(d.selfKey(), resp.Node.CreatedIndex)
+	_, err = w.Next()
 	return err
 }
 
-func Do(discoveryURL string, name string, peer string, closeChan <-chan bool, startRoutine func(func())) ([]string, error) {
-	return defaultDiscoverer.Do(discoveryURL, name, peer, closeChan, startRoutine)
+func (d *discovery) checkCluster() (client.Nodes, int, error) {
+	configKey := path.Join("/", d.cluster, "_config")
+	// find cluster size
+	resp, err := d.c.Get(path.Join(configKey, "size"))
+	if err != nil {
+		if err == client.ErrKeyNoExist {
+			return nil, 0, ErrSizeNotFound
+		}
+		if err == client.ErrTimeout {
+			return d.checkClusterRetry()
+		}
+		return nil, 0, err
+	}
+	size, err := strconv.Atoi(resp.Node.Value)
+	if err != nil {
+		return nil, 0, ErrBadSizeKey
+	}
+
+	resp, err = d.c.Get(d.cluster)
+	if err != nil {
+		if err == client.ErrTimeout {
+			return d.checkClusterRetry()
+		}
+		return nil, 0, err
+	}
+	nodes := make(client.Nodes, 0)
+	// append non-config keys to nodes
+	for _, n := range resp.Node.Nodes {
+		if !strings.Contains(n.Key, configKey) {
+			nodes = append(nodes, n)
+		}
+	}
+
+	snodes := sortableNodes{nodes}
+	sort.Sort(snodes)
+
+	// find self position
+	for i := range nodes {
+		if strings.Contains(nodes[i].Key, d.selfKey()) {
+			break
+		}
+		if i >= size-1 {
+			return nil, size, ErrFullCluster
+		}
+	}
+	return nodes, size, nil
 }
+
+func (d *discovery) logAndBackoffForRetry(step string) {
+	d.retries++
+	retryTime := time.Second * (0x1 << d.retries)
+	log.Println("discovery: during", step, "connection to", d.url, "timed out, retrying in", retryTime)
+	d.clock.Sleep(retryTime)
+}
+
+func (d *discovery) checkClusterRetry() (client.Nodes, int, error) {
+	if d.retries < nRetries {
+		d.logAndBackoffForRetry("cluster status check")
+		return d.checkCluster()
+	}
+	return nil, 0, ErrTooManyRetries
+}
+
+func (d *discovery) waitNodesRetry() (client.Nodes, error) {
+	if d.retries < nRetries {
+		d.logAndBackoffForRetry("waiting for other nodes")
+		nodes, n, err := d.checkCluster()
+		if err != nil {
+			return nil, err
+		}
+		return d.waitNodes(nodes, n)
+	}
+	return nil, ErrTooManyRetries
+}
+
+func (d *discovery) waitNodes(nodes client.Nodes, size int) (client.Nodes, error) {
+	if len(nodes) > size {
+		nodes = nodes[:size]
+	}
+	w := d.c.RecursiveWatch(d.cluster, nodes[len(nodes)-1].ModifiedIndex+1)
+	all := make(client.Nodes, len(nodes))
+	copy(all, nodes)
+	// wait for others
+	for len(all) < size {
+		resp, err := w.Next()
+		if err != nil {
+			if err == client.ErrTimeout {
+				return d.waitNodesRetry()
+			}
+			return nil, err
+		}
+		all = append(all, resp.Node)
+	}
+	return all, nil
+}
+
+func (d *discovery) selfKey() string {
+	return path.Join("/", d.cluster, fmt.Sprintf("%d", d.id))
+}
+
+func nodesToCluster(ns client.Nodes) string {
+	s := make([]string, len(ns))
+	for i, n := range ns {
+		s[i] = n.Value
+	}
+	return strings.Join(s, ",")
+}
+
+type sortableNodes struct{ client.Nodes }
+
+func (ns sortableNodes) Len() int { return len(ns.Nodes) }
+func (ns sortableNodes) Less(i, j int) bool {
+	return ns.Nodes[i].CreatedIndex < ns.Nodes[j].CreatedIndex
+}
+func (ns sortableNodes) Swap(i, j int) { ns.Nodes[i], ns.Nodes[j] = ns.Nodes[j], ns.Nodes[i] }
