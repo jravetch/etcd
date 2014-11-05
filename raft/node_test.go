@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
-	"github.com/coreos/etcd/pkg"
+	"github.com/coreos/etcd/pkg/testutil"
 	"github.com/coreos/etcd/raft/raftpb"
 )
 
@@ -121,7 +121,7 @@ func TestBlockProposal(t *testing.T) {
 		errc <- n.Propose(context.TODO(), []byte("somedata"))
 	}()
 
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	select {
 	case err := <-errc:
 		t.Errorf("err = %v, want blocking", err)
@@ -129,7 +129,7 @@ func TestBlockProposal(t *testing.T) {
 	}
 
 	n.Campaign(context.TODO())
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	select {
 	case err := <-errc:
 		if err != nil {
@@ -195,11 +195,15 @@ func TestNode(t *testing.T) {
 	n.Campaign(ctx)
 	if g := <-n.Ready(); !reflect.DeepEqual(g, wants[0]) {
 		t.Errorf("#%d: g = %+v,\n             w   %+v", 1, g, wants[0])
+	} else {
+		n.Advance()
 	}
 
 	n.Propose(ctx, []byte("foo"))
 	if g := <-n.Ready(); !reflect.DeepEqual(g, wants[1]) {
 		t.Errorf("#%d: g = %+v,\n             w   %+v", 2, g, wants[1])
+	} else {
+		n.Advance()
 	}
 
 	select {
@@ -226,6 +230,8 @@ func TestNodeRestart(t *testing.T) {
 	n := RestartNode(1, 10, 1, nil, st, entries)
 	if g := <-n.Ready(); !reflect.DeepEqual(g, want) {
 		t.Errorf("g = %+v,\n             w   %+v", g, want)
+	} else {
+		n.Advance()
 	}
 
 	select {
@@ -253,24 +259,26 @@ func TestNodeCompact(t *testing.T) {
 		Nodes: []uint64{1},
 	}
 
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	select {
 	case <-n.Ready():
+		n.Advance()
 	default:
 		t.Fatalf("unexpected proposal failure: unable to commit entry")
 	}
 
 	n.Compact(w.Index, w.Nodes, w.Data)
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	select {
 	case rd := <-n.Ready():
 		if !reflect.DeepEqual(rd.Snapshot, w) {
 			t.Errorf("snap = %+v, want %+v", rd.Snapshot, w)
 		}
+		n.Advance()
 	default:
 		t.Fatalf("unexpected compact failure: unable to create a snapshot")
 	}
-	pkg.ForceGosched()
+	testutil.ForceGosched()
 	// TODO: this test the run updates the snapi correctly... should be tested
 	// separately with other kinds of updates
 	select {
@@ -282,6 +290,28 @@ func TestNodeCompact(t *testing.T) {
 
 	if r.raftLog.offset != w.Index {
 		t.Errorf("log.offset = %d, want %d", r.raftLog.offset, w.Index)
+	}
+}
+
+func TestNodeAdvance(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	n := StartNode(1, []Peer{{ID: 1}}, 10, 1)
+	n.ApplyConfChange(raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 1})
+	n.Campaign(ctx)
+	<-n.Ready()
+	n.Propose(ctx, []byte("foo"))
+	select {
+	case rd := <-n.Ready():
+		t.Fatalf("unexpected Ready before Advance: %+v", rd)
+	default:
+	}
+	n.Advance()
+	select {
+	case <-n.Ready():
+	default:
+		t.Errorf("expect Ready after Advance, but there is no Ready available")
 	}
 }
 

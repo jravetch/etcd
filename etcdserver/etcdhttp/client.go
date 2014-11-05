@@ -33,6 +33,7 @@ import (
 	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/jonboulle/clockwork"
 	etcdErr "github.com/coreos/etcd/error"
 	"github.com/coreos/etcd/etcdserver"
+	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/store"
@@ -42,7 +43,7 @@ import (
 const (
 	keysPrefix               = "/v2/keys"
 	deprecatedMachinesPrefix = "/v2/machines"
-	adminMembersPrefix       = "/v2/admin/members/"
+	membersPrefix            = "/v2/members"
 	statsPrefix              = "/v2/stats"
 	versionPrefix            = "/version"
 )
@@ -50,16 +51,17 @@ const (
 // NewClientHandler generates a muxed http.Handler with the given parameters to serve etcd client requests.
 func NewClientHandler(server *etcdserver.EtcdServer) http.Handler {
 	kh := &keysHandler{
-		server:  server,
-		timer:   server,
-		timeout: defaultServerTimeout,
+		server:      server,
+		clusterInfo: server.Cluster,
+		timer:       server,
+		timeout:     defaultServerTimeout,
 	}
 
 	sh := &statsHandler{
 		stats: server,
 	}
 
-	amh := &adminMembersHandler{
+	mh := &membersHandler{
 		server:      server,
 		clusterInfo: server.Cluster,
 		clock:       clockwork.NewRealClock(),
@@ -77,21 +79,24 @@ func NewClientHandler(server *etcdserver.EtcdServer) http.Handler {
 	mux.HandleFunc(statsPrefix+"/store", sh.serveStore)
 	mux.HandleFunc(statsPrefix+"/self", sh.serveSelf)
 	mux.HandleFunc(statsPrefix+"/leader", sh.serveLeader)
-	mux.Handle(adminMembersPrefix, amh)
+	mux.Handle(membersPrefix, mh)
+	mux.Handle(membersPrefix+"/", mh)
 	mux.Handle(deprecatedMachinesPrefix, dmh)
 	return mux
 }
 
 type keysHandler struct {
-	server  etcdserver.Server
-	timer   etcdserver.RaftTimer
-	timeout time.Duration
+	server      etcdserver.Server
+	clusterInfo etcdserver.ClusterInfo
+	timer       etcdserver.RaftTimer
+	timeout     time.Duration
 }
 
 func (h *keysHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !allowMethod(w, r.Method, "GET", "PUT", "POST", "DELETE") {
+	if !allowMethod(w, r.Method, "HEAD", "GET", "PUT", "POST", "DELETE") {
 		return
 	}
+	w.Header().Set("X-Etcd-Cluster-ID", h.clusterInfo.ID().String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
 	defer cancel()
@@ -136,82 +141,86 @@ func (h *deprecatedMachinesHandler) ServeHTTP(w http.ResponseWriter, r *http.Req
 	w.Write([]byte(strings.Join(endpoints, ", ")))
 }
 
-type adminMembersHandler struct {
+type membersHandler struct {
 	server      etcdserver.Server
 	clusterInfo etcdserver.ClusterInfo
 	clock       clockwork.Clock
 }
 
-func (h *adminMembersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *membersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !allowMethod(w, r.Method, "GET", "POST", "DELETE") {
 		return
 	}
+	w.Header().Set("X-Etcd-Cluster-ID", h.clusterInfo.ID().String())
+
 	ctx, cancel := context.WithTimeout(context.Background(), defaultServerTimeout)
 	defer cancel()
 
 	switch r.Method {
 	case "GET":
-		if s := strings.TrimPrefix(r.URL.Path, adminMembersPrefix); s != "" {
-			http.NotFound(w, r)
+		if trimPrefix(r.URL.Path, membersPrefix) != "" {
+			writeError(w, httptypes.NewHTTPError(http.StatusNotFound, "Not found"))
 			return
 		}
-		ms := struct {
-			Members []*etcdserver.Member `json:"members"`
-		}{
-			Members: h.clusterInfo.Members(),
-		}
+		mc := newMemberCollection(h.clusterInfo.Members())
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(ms); err != nil {
+		if err := json.NewEncoder(w).Encode(mc); err != nil {
 			log.Printf("etcdhttp: %v", err)
 		}
 	case "POST":
 		ctype := r.Header.Get("Content-Type")
 		if ctype != "application/json" {
-			http.Error(w, fmt.Sprintf("bad Content-Type %s, accept application/json", ctype), http.StatusBadRequest)
+			writeError(w, httptypes.NewHTTPError(http.StatusUnsupportedMediaType, fmt.Sprintf("Bad Content-Type %s, accept application/json", ctype)))
 			return
 		}
 		b, err := ioutil.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, httptypes.NewHTTPError(http.StatusBadRequest, err.Error()))
 			return
 		}
-		raftAttr := etcdserver.RaftAttributes{}
-		if err := json.Unmarshal(b, &raftAttr); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		req := httptypes.MemberCreateRequest{}
+		if err := json.Unmarshal(b, &req); err != nil {
+			writeError(w, httptypes.NewHTTPError(http.StatusBadRequest, err.Error()))
 			return
 		}
-		validURLs, err := types.NewURLs(raftAttr.PeerURLs)
-		if err != nil {
-			http.Error(w, "bad peer urls", http.StatusBadRequest)
-			return
-		}
+
 		now := h.clock.Now()
-		m := etcdserver.NewMember("", validURLs, "", &now)
+		m := etcdserver.NewMember("", req.PeerURLs, "", &now)
 		if err := h.server.AddMember(ctx, *m); err != nil {
-			log.Printf("etcdhttp: error adding node %x: %v", m.ID, err)
+			log.Printf("etcdhttp: error adding node %s: %v", m.ID, err)
 			writeError(w, err)
 			return
 		}
-		log.Printf("etcdhttp: added node %x with peer urls %v", m.ID, raftAttr.PeerURLs)
+
+		res := newMember(m)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		if err := json.NewEncoder(w).Encode(m); err != nil {
+		if err := json.NewEncoder(w).Encode(res); err != nil {
 			log.Printf("etcdhttp: %v", err)
 		}
 	case "DELETE":
-		idStr := strings.TrimPrefix(r.URL.Path, adminMembersPrefix)
-		id, err := strconv.ParseUint(idStr, 16, 64)
+		idStr := trimPrefix(r.URL.Path, membersPrefix)
+		if idStr == "" {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		id, err := types.IDFromString(idStr)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, httptypes.NewHTTPError(http.StatusBadRequest, err.Error()))
 			return
 		}
-		log.Printf("etcdhttp: remove node %x", id)
-		if err := h.server.RemoveMember(ctx, id); err != nil {
-			log.Printf("etcdhttp: error removing node %x: %v", id, err)
+		err = h.server.RemoveMember(ctx, uint64(id))
+		switch {
+		case err == etcdserver.ErrIDRemoved:
+			writeError(w, httptypes.NewHTTPError(http.StatusGone, fmt.Sprintf("Member permanently removed: %s", idStr)))
+		case err == etcdserver.ErrIDNotFound:
+			writeError(w, httptypes.NewHTTPError(http.StatusNotFound, fmt.Sprintf("No such member: %s", idStr)))
+		case err != nil:
+			log.Printf("etcdhttp: error removing node %s: %v", id, err)
 			writeError(w, err)
-			return
+		default:
+			w.WriteHeader(http.StatusNoContent)
 		}
-		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -335,7 +344,7 @@ func parseKeyRequest(r *http.Request, id uint64, clock clockwork.Clock) (etcdser
 	pV := r.FormValue("prevValue")
 	if _, ok := r.Form["prevValue"]; ok && pV == "" {
 		return emptyReq, etcdErr.NewRequestError(
-			etcdErr.EcodeInvalidField,
+			etcdErr.EcodePrevValueRequired,
 			`"prevValue" cannot be empty`,
 		)
 	}
@@ -467,9 +476,12 @@ func trimEventPrefix(ev *store.Event, prefix string) *store.Event {
 	if ev == nil {
 		return nil
 	}
-	ev.Node = trimNodeExternPrefix(ev.Node, prefix)
-	ev.PrevNode = trimNodeExternPrefix(ev.PrevNode, prefix)
-	return ev
+	// Since the *Event may reference one in the store history
+	// history, we must copy it before modifying
+	e := ev.Clone()
+	e.Node = trimNodeExternPrefix(e.Node, prefix)
+	e.PrevNode = trimNodeExternPrefix(e.PrevNode, prefix)
+	return e
 }
 
 func trimNodeExternPrefix(n *store.NodeExtern, prefix string) *store.NodeExtern {
@@ -510,4 +522,36 @@ func getBool(form url.Values, key string) (b bool, err error) {
 		b, err = strconv.ParseBool(vals[0])
 	}
 	return
+}
+
+// trimPrefix removes a given prefix and any slash following the prefix
+// e.g.: trimPrefix("foo", "foo") == trimPrefix("foo/", "foo") == ""
+func trimPrefix(p, prefix string) (s string) {
+	s = strings.TrimPrefix(p, prefix)
+	s = strings.TrimPrefix(s, "/")
+	return
+}
+
+func newMemberCollection(ms []*etcdserver.Member) *httptypes.MemberCollection {
+	c := httptypes.MemberCollection(make([]httptypes.Member, len(ms)))
+
+	for i, m := range ms {
+		c[i] = newMember(m)
+	}
+
+	return &c
+}
+
+func newMember(m *etcdserver.Member) httptypes.Member {
+	tm := httptypes.Member{
+		ID:         m.ID.String(),
+		Name:       m.Name,
+		PeerURLs:   make([]string, len(m.PeerURLs)),
+		ClientURLs: make([]string, len(m.ClientURLs)),
+	}
+
+	copy(tm.PeerURLs, m.PeerURLs)
+	copy(tm.ClientURLs, m.ClientURLs)
+
+	return tm
 }

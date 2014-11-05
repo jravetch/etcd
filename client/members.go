@@ -17,139 +17,133 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"path"
-	"time"
+
+	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
+	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
+	"github.com/coreos/etcd/pkg/types"
 )
 
 var (
-	DefaultV2MembersPrefix = "/v2/admin/members"
+	DefaultV2MembersPrefix = "/v2/members"
 )
 
-func NewMembersAPI(tr *http.Transport, ep string, to time.Duration) (MembersAPI, error) {
-	u, err := url.Parse(ep)
-	if err != nil {
-		return nil, err
-	}
-
-	u.Path = path.Join(u.Path, DefaultV2MembersPrefix)
-
-	c := &httpClient{
-		transport: tr,
-		endpoint:  *u,
-		timeout:   to,
-	}
-
-	mAPI := httpMembersAPI{
+func NewMembersAPI(c HTTPClient) MembersAPI {
+	return &httpMembersAPI{
 		client: c,
 	}
-
-	return &mAPI, nil
 }
 
 type MembersAPI interface {
-	List() ([]Member, error)
-}
-
-type Member struct {
-	ID         uint64
-	Name       string
-	PeerURLs   []url.URL
-	ClientURLs []url.URL
-}
-
-func (m *Member) UnmarshalJSON(data []byte) (err error) {
-	rm := struct {
-		ID         uint64
-		Name       string
-		PeerURLs   []string
-		ClientURLs []string
-	}{}
-
-	if err := json.Unmarshal(data, &rm); err != nil {
-		return err
-	}
-
-	parseURLs := func(strs []string) ([]url.URL, error) {
-		urls := make([]url.URL, len(strs))
-		for i, s := range strs {
-			u, err := url.Parse(s)
-			if err != nil {
-				return nil, err
-			}
-			urls[i] = *u
-		}
-
-		return urls, nil
-	}
-
-	if m.PeerURLs, err = parseURLs(rm.PeerURLs); err != nil {
-		return err
-	}
-
-	if m.ClientURLs, err = parseURLs(rm.ClientURLs); err != nil {
-		return err
-	}
-
-	m.ID = rm.ID
-	m.Name = rm.Name
-
-	return nil
-}
-
-type membersCollection struct {
-	Members []Member
+	List(ctx context.Context) ([]httptypes.Member, error)
+	Add(ctx context.Context, peerURL string) (*httptypes.Member, error)
+	Remove(ctx context.Context, mID string) error
 }
 
 type httpMembersAPI struct {
-	client *httpClient
+	client HTTPClient
 }
 
-func (m *httpMembersAPI) List() ([]Member, error) {
-	httpresp, body, err := m.client.doWithTimeout(&membersAPIActionList{})
+func (m *httpMembersAPI) List(ctx context.Context) ([]httptypes.Member, error) {
+	req := &membersAPIActionList{}
+	resp, body, err := m.client.Do(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	mResponse := httpMembersAPIResponse{
-		code: httpresp.StatusCode,
-		body: body,
-	}
-
-	if err = mResponse.err(); err != nil {
+	if err := assertStatusCode(http.StatusOK, resp.StatusCode); err != nil {
 		return nil, err
 	}
 
-	var mCollection membersCollection
-	if err = mResponse.unmarshalBody(&mCollection); err != nil {
+	var mCollection httptypes.MemberCollection
+	if err := json.Unmarshal(body, &mCollection); err != nil {
 		return nil, err
 	}
 
-	return mCollection.Members, nil
+	return []httptypes.Member(mCollection), nil
 }
 
-type httpMembersAPIResponse struct {
-	code int
-	body []byte
-}
-
-func (r *httpMembersAPIResponse) err() (err error) {
-	if r.code != http.StatusOK {
-		err = fmt.Errorf("unrecognized status code %d", r.code)
+func (m *httpMembersAPI) Add(ctx context.Context, peerURL string) (*httptypes.Member, error) {
+	urls, err := types.NewURLs([]string{peerURL})
+	if err != nil {
+		return nil, err
 	}
-	return
+
+	req := &membersAPIActionAdd{peerURLs: urls}
+	resp, body, err := m.client.Do(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := assertStatusCode(http.StatusCreated, resp.StatusCode); err != nil {
+		return nil, err
+	}
+
+	var memb httptypes.Member
+	if err := json.Unmarshal(body, &memb); err != nil {
+		return nil, err
+	}
+
+	return &memb, nil
 }
 
-func (r *httpMembersAPIResponse) unmarshalBody(dst interface{}) (err error) {
-	return json.Unmarshal(r.body, dst)
+func (m *httpMembersAPI) Remove(ctx context.Context, memberID string) error {
+	req := &membersAPIActionRemove{memberID: memberID}
+	resp, _, err := m.client.Do(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	return assertStatusCode(http.StatusNoContent, resp.StatusCode)
 }
 
 type membersAPIActionList struct{}
 
-func (l *membersAPIActionList) httpRequest(ep url.URL) *http.Request {
-	req, _ := http.NewRequest("GET", ep.String(), nil)
+func (l *membersAPIActionList) HTTPRequest(ep url.URL) *http.Request {
+	u := v2MembersURL(ep)
+	req, _ := http.NewRequest("GET", u.String(), nil)
 	return req
+}
+
+type membersAPIActionRemove struct {
+	memberID string
+}
+
+func (d *membersAPIActionRemove) HTTPRequest(ep url.URL) *http.Request {
+	u := v2MembersURL(ep)
+	u.Path = path.Join(u.Path, d.memberID)
+	req, _ := http.NewRequest("DELETE", u.String(), nil)
+	return req
+}
+
+type membersAPIActionAdd struct {
+	peerURLs types.URLs
+}
+
+func (a *membersAPIActionAdd) HTTPRequest(ep url.URL) *http.Request {
+	u := v2MembersURL(ep)
+	m := httptypes.MemberCreateRequest{PeerURLs: a.peerURLs}
+	b, _ := json.Marshal(&m)
+	req, _ := http.NewRequest("POST", u.String(), bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func assertStatusCode(want, got int) (err error) {
+	if want != got {
+		err = fmt.Errorf("unexpected status code %d", got)
+	}
+	return err
+}
+
+// v2MembersURL add the necessary path to the provided endpoint
+// to route requests to the default v2 members API.
+func v2MembersURL(ep url.URL) *url.URL {
+	ep.Path = path.Join(ep.Path, DefaultV2MembersPrefix)
+	return &ep
 }

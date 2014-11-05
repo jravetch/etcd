@@ -401,19 +401,19 @@ curl 'http://127.0.0.1:2379/v2/keys/dir/asdf?consistent=true&wait=true'
 
 ```json
 {
-	"action": "expire",
-	"node": {
-		"createdIndex": 8,
-		"key": "/dir",
-		"modifiedIndex": 15
-	},
-	"prevNode": {
-		"createdIndex": 8,
-		"key": "/dir",
-		"dir":true,
-		"modifiedIndex": 17,
-		"expiration": "2013-12-11T10:39:35.689275857-08:00"
-	}
+    "action": "expire",
+    "node": {
+        "createdIndex": 8,
+        "key": "/dir",
+        "modifiedIndex": 15
+    },
+    "prevNode": {
+        "createdIndex": 8,
+        "key": "/dir",
+        "dir":true,
+        "modifiedIndex": 17,
+        "expiration": "2013-12-11T10:39:35.689275857-08:00"
+    }
 }
 ```
 
@@ -639,22 +639,22 @@ We should see the response as an array of items:
 ```json
 {
     "action": "get",
-    "node": {
-        "key": "/",
-        "dir": true,
-        "nodes": [
-            {
-                "key": "/foo_dir",
-                "dir": true,
-                "modifiedIndex": 2,
-                "createdIndex": 2
-            },
-            {
-                "key": "/foo",
-                "value": "two",
-                "modifiedIndex": 1,
-                "createdIndex": 1
-            }
+    "node": {
+        "key": "/",
+        "dir": true,
+        "nodes": [
+            {
+                "key": "/foo_dir",
+                "dir": true,
+                "modifiedIndex": 2,
+                "createdIndex": 2
+            },
+            {
+                "key": "/foo",
+                "value": "two",
+                "modifiedIndex": 1,
+                "createdIndex": 1
+            }
         ]
     }
 }
@@ -669,33 +669,33 @@ curl http://127.0.0.1:2379/v2/keys/?recursive=true
 
 ```json
 {
-    "action": "get",
-    "node": {
-        "key": "/",
-        "dir": true,
-        "nodes": [
-            {
-                "key": "/foo_dir",
-                "dir": true,
-                "nodes": [
-                    {
-                        "key": "/foo_dir/foo",
-                        "value": "bar",
-                        "modifiedIndex": 2,
-                        "createdIndex": 2
-                    }
-                ],
-                "modifiedIndex": 2,
-                "createdIndex": 2
-            },
-            {
-                "key": "/foo",
-                "value": "two",
-                "modifiedIndex": 1,
-                "createdIndex": 1
-            }
-        ]
-    }
+    "action": "get",
+    "node": {
+        "key": "/",
+        "dir": true,
+        "nodes": [
+            {
+                "key": "/foo_dir",
+                "dir": true,
+                "nodes": [
+                    {
+                        "key": "/foo_dir/foo",
+                        "value": "bar",
+                        "modifiedIndex": 2,
+                        "createdIndex": 2
+                    }
+                ],
+                "modifiedIndex": 2,
+                "createdIndex": 2
+            },
+            {
+                "key": "/foo",
+                "value": "two",
+                "modifiedIndex": 1,
+                "createdIndex": 1
+            }
+        ]
+    }
 }
 ```
 
@@ -896,7 +896,7 @@ curl http://127.0.0.1:2379/v2/stats/leader
         "startTime": "2014-10-24T13:15:51.184719899-07:00",
         "uptime": "7m17.859616962s"
     },
-    "name": "node1",
+    "name": "infra1",
     "recvAppendRequestCnt": 3949,
     "recvBandwidthRate": 561.5729321100841,
     "recvPkgRate": 9.008227977383449,
@@ -1005,6 +1005,6 @@ curl http://127.0.0.1:2379/v2/stats/store
 
 ## Cluster Config
 
-See the [admin API guide][admin-api] for details on the cluster management APIs.
+See the [other etcd APIs][other-apis] for details on the cluster management.
 
-[admin-api]: https://github.com/coreos/etcd/blob/master/Documentation/0.5/admin_api.md
+[other-apis]: https://github.com/coreos/etcd/blob/master/Documentation/0.5/other_apis.md

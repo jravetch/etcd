@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/coreos/etcd/etcdserver/stats"
+	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft/raftpb"
 )
 
@@ -49,15 +49,18 @@ func Sender(t *http.Transport, cl *Cluster, ss *stats.ServerStats, ls *stats.Lea
 // ClusterStore, retrying up to 3 times for each message. The given
 // ServerStats and LeaderStats are updated appropriately
 func send(c *http.Client, cl *Cluster, m raftpb.Message, ss *stats.ServerStats, ls *stats.LeaderStats) {
+	to := types.ID(m.To)
 	cid := cl.ID()
 	// TODO (xiangli): reasonable retry logic
 	for i := 0; i < 3; i++ {
-		memb := cl.Member(m.To)
+		memb := cl.Member(to)
 		if memb == nil {
-			// TODO: unknown peer id.. what do we do? I
-			// don't think his should ever happen, need to
-			// look into this further.
-			log.Printf("etcdhttp: no member for %d", m.To)
+			if !cl.IsIDRemoved(to) {
+				// TODO: unknown peer id.. what do we do? I
+				// don't think his should ever happen, need to
+				// look into this further.
+				log.Printf("etcdserver: error sending message to unknown receiver %s", to.String())
+			}
 			return
 		}
 		u := fmt.Sprintf("%s%s", memb.PickPeerURL(), raftPrefix)
@@ -66,14 +69,13 @@ func send(c *http.Client, cl *Cluster, m raftpb.Message, ss *stats.ServerStats, 
 		// of messages out at a time.
 		data, err := m.Marshal()
 		if err != nil {
-			log.Println("etcdhttp: dropping message:", err)
+			log.Println("sender: dropping message:", err)
 			return // drop bad message
 		}
 		if m.Type == raftpb.MsgApp {
 			ss.SendAppendReq(len(data))
 		}
-		to := idAsHex(m.To)
-		fs := ls.Follower(to)
+		fs := ls.Follower(to.String())
 
 		start := time.Now()
 		sent := httpPost(c, u, cid, data)
@@ -89,14 +91,14 @@ func send(c *http.Client, cl *Cluster, m raftpb.Message, ss *stats.ServerStats, 
 
 // httpPost POSTs a data payload to a url using the given client. Returns true
 // if the POST succeeds, false on any failure.
-func httpPost(c *http.Client, url string, cid uint64, data []byte) bool {
+func httpPost(c *http.Client, url string, cid types.ID, data []byte) bool {
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
 	if err != nil {
 		// TODO: log the error?
 		return false
 	}
 	req.Header.Set("Content-Type", "application/protobuf")
-	req.Header.Set("X-Etcd-Cluster-ID", strconv.FormatUint(cid, 16))
+	req.Header.Set("X-Etcd-Cluster-ID", cid.String())
 	resp, err := c.Do(req)
 	if err != nil {
 		// TODO: log the error?
@@ -107,11 +109,12 @@ func httpPost(c *http.Client, url string, cid uint64, data []byte) bool {
 	switch resp.StatusCode {
 	case http.StatusPreconditionFailed:
 		// TODO: shutdown the etcdserver gracefully?
-		log.Panicf("clusterID mismatch")
+		log.Fatalf("etcd: conflicting cluster ID with the target cluster (%s != %s)", resp.Header.Get("X-Etcd-Cluster-ID"), cid.String())
 		return false
 	case http.StatusForbidden:
 		// TODO: stop the server
-		log.Panicf("the member has been removed")
+		log.Println("etcd: this member has been permanently removed from the cluster")
+		log.Fatalln("etcd: the data-dir used by this member must be removed so that this host can be re-added with a new member ID")
 		return false
 	case http.StatusNoContent:
 		return true

@@ -35,7 +35,9 @@ import (
 	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/jonboulle/clockwork"
 	etcdErr "github.com/coreos/etcd/error"
 	"github.com/coreos/etcd/etcdserver"
+	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/coreos/etcd/store"
 	"github.com/coreos/etcd/version"
@@ -54,6 +56,18 @@ func mustMarshalEvent(t *testing.T, ev *store.Event) string {
 func mustNewForm(t *testing.T, p string, vals url.Values) *http.Request {
 	u := mustNewURL(t, path.Join(keysPrefix, p))
 	req, err := http.NewRequest("PUT", u.String(), strings.NewReader(vals.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err != nil {
+		t.Fatalf("error creating new request: %v", err)
+	}
+	return req
+}
+
+// mustNewPostForm takes a set of Values and constructs a POST *http.Request,
+// with a URL constructed from appending the given path to the standard keysPrefix
+func mustNewPostForm(t *testing.T, p string, vals url.Values) *http.Request {
+	u := mustNewURL(t, path.Join(keysPrefix, p))
+	req, err := http.NewRequest("POST", u.String(), strings.NewReader(vals.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if err != nil {
 		t.Fatalf("error creating new request: %v", err)
@@ -255,7 +269,7 @@ func TestBadParseRequest(t *testing.T) {
 		// prevValue cannot be empty
 		{
 			mustNewForm(t, "foo", url.Values{"prevValue": []string{""}}),
-			etcdErr.EcodeInvalidField,
+			etcdErr.EcodePrevValueRequired,
 		},
 		// wait is only valid with GET requests
 		{
@@ -547,29 +561,20 @@ func TestGoodParseRequest(t *testing.T) {
 	}
 }
 
-func TestServeAdminMembers(t *testing.T) {
-	memb1 := etcdserver.Member{ID: 1, Attributes: etcdserver.Attributes{ClientURLs: []string{"http://localhost:8080"}}}
-	memb2 := etcdserver.Member{ID: 2, Attributes: etcdserver.Attributes{ClientURLs: []string{"http://localhost:8081"}}}
+func TestServeMembers(t *testing.T) {
+	memb1 := etcdserver.Member{ID: 12, Attributes: etcdserver.Attributes{ClientURLs: []string{"http://localhost:8080"}}}
+	memb2 := etcdserver.Member{ID: 13, Attributes: etcdserver.Attributes{ClientURLs: []string{"http://localhost:8081"}}}
 	cluster := &fakeCluster{
+		id:      1,
 		members: map[uint64]*etcdserver.Member{1: &memb1, 2: &memb2},
 	}
-	h := &adminMembersHandler{
+	h := &membersHandler{
 		server:      &serverRecorder{},
 		clock:       clockwork.NewFakeClock(),
 		clusterInfo: cluster,
 	}
 
-	msb, err := json.Marshal(
-		struct {
-			Members []etcdserver.Member `json:"members"`
-		}{
-			Members: []etcdserver.Member{memb1, memb2},
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wms := string(msb) + "\n"
+	wmc := string(`{"members":[{"id":"c","name":"","peerURLs":[],"clientURLs":["http://localhost:8080"]},{"id":"d","name":"","peerURLs":[],"clientURLs":["http://localhost:8081"]}]}`)
 
 	tests := []struct {
 		path  string
@@ -577,9 +582,10 @@ func TestServeAdminMembers(t *testing.T) {
 		wct   string
 		wbody string
 	}{
-		{adminMembersPrefix, http.StatusOK, "application/json", wms},
-		{path.Join(adminMembersPrefix, "100"), http.StatusNotFound, "text/plain; charset=utf-8", "404 page not found\n"},
-		{path.Join(adminMembersPrefix, "foobar"), http.StatusNotFound, "text/plain; charset=utf-8", "404 page not found\n"},
+		{membersPrefix, http.StatusOK, "application/json", wmc + "\n"},
+		{membersPrefix + "/", http.StatusOK, "application/json", wmc + "\n"},
+		{path.Join(membersPrefix, "100"), http.StatusNotFound, "application/json", `{"message":"Not found"}`},
+		{path.Join(membersPrefix, "foobar"), http.StatusNotFound, "application/json", `{"message":"Not found"}`},
 	}
 
 	for i, tt := range tests {
@@ -596,29 +602,30 @@ func TestServeAdminMembers(t *testing.T) {
 		if gct := rw.Header().Get("Content-Type"); gct != tt.wct {
 			t.Errorf("#%d: content-type = %s, want %s", i, gct, tt.wct)
 		}
+		gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+		wcid := cluster.ID().String()
+		if gcid != wcid {
+			t.Errorf("#%d: cid = %s, want %s", i, gcid, wcid)
+		}
 		if rw.Body.String() != tt.wbody {
 			t.Errorf("#%d: body = %q, want %q", i, rw.Body.String(), tt.wbody)
 		}
 	}
 }
 
-func TestServeAdminMembersPut(t *testing.T) {
-	u := mustNewURL(t, adminMembersPrefix)
-	raftAttr := etcdserver.RaftAttributes{PeerURLs: []string{"http://127.0.0.1:1"}}
-	b, err := json.Marshal(raftAttr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := bytes.NewReader(b)
-	req, err := http.NewRequest("POST", u.String(), body)
+func TestServeMembersCreate(t *testing.T) {
+	u := mustNewURL(t, membersPrefix)
+	b := []byte(`{"peerURLs":["http://127.0.0.1:1"]}`)
+	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	s := &serverRecorder{}
-	h := &adminMembersHandler{
-		server: s,
-		clock:  clockwork.NewFakeClock(),
+	h := &membersHandler{
+		server:      s,
+		clock:       clockwork.NewFakeClock(),
+		clusterInfo: &fakeCluster{id: 1},
 	}
 	rw := httptest.NewRecorder()
 
@@ -628,38 +635,45 @@ func TestServeAdminMembersPut(t *testing.T) {
 	if rw.Code != wcode {
 		t.Errorf("code=%d, want %d", rw.Code, wcode)
 	}
-	wm := etcdserver.Member{
-		ID:             3064321551348478165,
-		RaftAttributes: raftAttr,
-	}
 
-	wb, err := json.Marshal(wm)
-	if err != nil {
-		t.Fatal(err)
-	}
 	wct := "application/json"
 	if gct := rw.Header().Get("Content-Type"); gct != wct {
 		t.Errorf("content-type = %s, want %s", gct, wct)
 	}
-	g := rw.Body.String()
-	w := string(wb) + "\n"
-	if g != w {
-		t.Errorf("got body=%q, want %q", g, w)
+	gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+	wcid := h.clusterInfo.ID().String()
+	if gcid != wcid {
+		t.Errorf("cid = %s, want %s", gcid, wcid)
 	}
+
+	wb := `{"id":"2a86a83729b330d5","name":"","peerURLs":["http://127.0.0.1:1"],"clientURLs":[]}` + "\n"
+	g := rw.Body.String()
+	if g != wb {
+		t.Errorf("got body=%q, want %q", g, wb)
+	}
+
+	wm := etcdserver.Member{
+		ID: 3064321551348478165,
+		RaftAttributes: etcdserver.RaftAttributes{
+			PeerURLs: []string{"http://127.0.0.1:1"},
+		},
+	}
+
 	wactions := []action{{name: "AddMember", params: []interface{}{wm}}}
 	if !reflect.DeepEqual(s.actions, wactions) {
 		t.Errorf("actions = %+v, want %+v", s.actions, wactions)
 	}
 }
 
-func TestServeAdminMembersDelete(t *testing.T) {
+func TestServeMembersDelete(t *testing.T) {
 	req := &http.Request{
 		Method: "DELETE",
-		URL:    mustNewURL(t, path.Join(adminMembersPrefix, "BEEF")),
+		URL:    mustNewURL(t, path.Join(membersPrefix, "BEEF")),
 	}
 	s := &serverRecorder{}
-	h := &adminMembersHandler{
-		server: s,
+	h := &membersHandler{
+		server:      s,
+		clusterInfo: &fakeCluster{id: 1},
 	}
 	rw := httptest.NewRecorder()
 
@@ -668,6 +682,11 @@ func TestServeAdminMembersDelete(t *testing.T) {
 	wcode := http.StatusNoContent
 	if rw.Code != wcode {
 		t.Errorf("code=%d, want %d", rw.Code, wcode)
+	}
+	gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+	wcid := h.clusterInfo.ID().String()
+	if gcid != wcid {
+		t.Errorf("cid = %s, want %s", gcid, wcid)
 	}
 	g := rw.Body.String()
 	if g != "" {
@@ -679,7 +698,7 @@ func TestServeAdminMembersDelete(t *testing.T) {
 	}
 }
 
-func TestServeAdminMembersFail(t *testing.T) {
+func TestServeMembersFail(t *testing.T) {
 	tests := []struct {
 		req    *http.Request
 		server etcdserver.Server
@@ -707,9 +726,10 @@ func TestServeAdminMembersFail(t *testing.T) {
 		{
 			// parse body error
 			&http.Request{
-				URL:    mustNewURL(t, adminMembersPrefix),
+				URL:    mustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader("bad json")),
+				Header: map[string][]string{"Content-Type": []string{"application/json"}},
 			},
 			&resServer{},
 
@@ -718,19 +738,19 @@ func TestServeAdminMembersFail(t *testing.T) {
 		{
 			// bad content type
 			&http.Request{
-				URL:    mustNewURL(t, adminMembersPrefix),
+				URL:    mustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/bad"}},
 			},
 			&errServer{},
 
-			http.StatusBadRequest,
+			http.StatusUnsupportedMediaType,
 		},
 		{
 			// bad url
 			&http.Request{
-				URL:    mustNewURL(t, adminMembersPrefix),
+				URL:    mustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://a"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -742,7 +762,7 @@ func TestServeAdminMembersFail(t *testing.T) {
 		{
 			// etcdserver.AddMember error
 			&http.Request{
-				URL:    mustNewURL(t, adminMembersPrefix),
+				URL:    mustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -754,9 +774,9 @@ func TestServeAdminMembersFail(t *testing.T) {
 			http.StatusInternalServerError,
 		},
 		{
-			// etcdserver.RemoveMember error
+			// etcdserver.RemoveMember error with arbitrary server error
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(adminMembersPrefix, "1")),
+				URL:    mustNewURL(t, path.Join(membersPrefix, "1")),
 				Method: "DELETE",
 			},
 			&errServer{
@@ -765,16 +785,68 @@ func TestServeAdminMembersFail(t *testing.T) {
 
 			http.StatusInternalServerError,
 		},
+		{
+			// etcdserver.RemoveMember error with previously removed ID
+			&http.Request{
+				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				Method: "DELETE",
+			},
+			&errServer{
+				etcdserver.ErrIDRemoved,
+			},
+
+			http.StatusGone,
+		},
+		{
+			// etcdserver.RemoveMember error with nonexistent ID
+			&http.Request{
+				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				Method: "DELETE",
+			},
+			&errServer{
+				etcdserver.ErrIDNotFound,
+			},
+
+			http.StatusNotFound,
+		},
+		{
+			// etcdserver.RemoveMember error with badly formed ID
+			&http.Request{
+				URL:    mustNewURL(t, path.Join(membersPrefix, "bad_id")),
+				Method: "DELETE",
+			},
+			nil,
+
+			http.StatusBadRequest,
+		},
+		{
+			// etcdserver.RemoveMember with no ID
+			&http.Request{
+				URL:    mustNewURL(t, membersPrefix),
+				Method: "DELETE",
+			},
+			nil,
+
+			http.StatusMethodNotAllowed,
+		},
 	}
 	for i, tt := range tests {
-		h := &adminMembersHandler{
-			server: tt.server,
-			clock:  clockwork.NewFakeClock(),
+		h := &membersHandler{
+			server:      tt.server,
+			clusterInfo: &fakeCluster{id: 1},
+			clock:       clockwork.NewFakeClock(),
 		}
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, tt.req)
 		if rw.Code != tt.wcode {
 			t.Errorf("#%d: code=%d, want %d", i, rw.Code, tt.wcode)
+		}
+		if rw.Code != http.StatusMethodNotAllowed {
+			gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+			wcid := h.clusterInfo.ID().String()
+			if gcid != wcid {
+				t.Errorf("#%d: cid = %s, want %s", i, gcid, wcid)
+			}
 		}
 	}
 }
@@ -899,10 +971,10 @@ type dummyStats struct {
 	data []byte
 }
 
-func (ds *dummyStats) SelfStats() []byte               { return ds.data }
-func (ds *dummyStats) LeaderStats() []byte             { return ds.data }
-func (ds *dummyStats) StoreStats() []byte              { return ds.data }
-func (ds *dummyStats) UpdateRecvApp(_ uint64, _ int64) {}
+func (ds *dummyStats) SelfStats() []byte                 { return ds.data }
+func (ds *dummyStats) LeaderStats() []byte               { return ds.data }
+func (ds *dummyStats) StoreStats() []byte                { return ds.data }
+func (ds *dummyStats) UpdateRecvApp(_ types.ID, _ int64) {}
 
 func TestServeSelfStats(t *testing.T) {
 	wb := []byte("some statistics")
@@ -1076,7 +1148,7 @@ func TestBadServeKeys(t *testing.T) {
 			},
 
 			http.StatusInternalServerError,
-			"Internal Server Error",
+			`{"message":"Internal Server Error"}`,
 		},
 		{
 			// etcdserver.Server etcd error
@@ -1096,21 +1168,78 @@ func TestBadServeKeys(t *testing.T) {
 			},
 
 			http.StatusInternalServerError,
-			"Internal Server Error",
+			`{"message":"Internal Server Error"}`,
 		},
 	}
 	for i, tt := range testBadCases {
 		h := &keysHandler{
-			timeout: 0, // context times out immediately
-			server:  tt.server,
+			timeout:     0, // context times out immediately
+			server:      tt.server,
+			clusterInfo: &fakeCluster{id: 1},
 		}
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, tt.req)
 		if rw.Code != tt.wcode {
 			t.Errorf("#%d: got code=%d, want %d", i, rw.Code, tt.wcode)
 		}
+		if rw.Code != http.StatusMethodNotAllowed {
+			gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+			wcid := h.clusterInfo.ID().String()
+			if gcid != wcid {
+				t.Errorf("#%d: cid = %s, want %s", i, gcid, wcid)
+			}
+		}
 		if g := strings.TrimSuffix(rw.Body.String(), "\n"); g != tt.wbody {
 			t.Errorf("#%d: body = %s, want %s", i, g, tt.wbody)
+		}
+	}
+}
+
+func TestServeKeysGood(t *testing.T) {
+	tests := []struct {
+		req   *http.Request
+		wcode int
+	}{
+		{
+			mustNewMethodRequest(t, "HEAD", "foo"),
+			http.StatusOK,
+		},
+		{
+			mustNewMethodRequest(t, "GET", "foo"),
+			http.StatusOK,
+		},
+		{
+			mustNewForm(t, "foo", url.Values{"value": []string{"bar"}}),
+			http.StatusOK,
+		},
+		{
+			mustNewMethodRequest(t, "DELETE", "foo"),
+			http.StatusOK,
+		},
+		{
+			mustNewPostForm(t, "foo", url.Values{"value": []string{"bar"}}),
+			http.StatusOK,
+		},
+	}
+	server := &resServer{
+		etcdserver.Response{
+			Event: &store.Event{
+				Action: store.Get,
+				Node:   &store.NodeExtern{},
+			},
+		},
+	}
+	for i, tt := range tests {
+		h := &keysHandler{
+			timeout:     time.Hour,
+			server:      server,
+			timer:       &dummyRaftTimer{},
+			clusterInfo: &fakeCluster{id: 1},
+		}
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, tt.req)
+		if rw.Code != tt.wcode {
+			t.Errorf("#%d: got code=%d, want %d", i, rw.Code, tt.wcode)
 		}
 	}
 }
@@ -1126,9 +1255,10 @@ func TestServeKeysEvent(t *testing.T) {
 		},
 	}
 	h := &keysHandler{
-		timeout: time.Hour,
-		server:  server,
-		timer:   &dummyRaftTimer{},
+		timeout:     time.Hour,
+		server:      server,
+		clusterInfo: &fakeCluster{id: 1},
+		timer:       &dummyRaftTimer{},
 	}
 	rw := httptest.NewRecorder()
 
@@ -1145,6 +1275,11 @@ func TestServeKeysEvent(t *testing.T) {
 
 	if rw.Code != wcode {
 		t.Errorf("got code=%d, want %d", rw.Code, wcode)
+	}
+	gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+	wcid := h.clusterInfo.ID().String()
+	if gcid != wcid {
+		t.Errorf("cid = %s, want %s", gcid, wcid)
 	}
 	g := rw.Body.String()
 	if g != wbody {
@@ -1164,9 +1299,10 @@ func TestServeKeysWatch(t *testing.T) {
 		},
 	}
 	h := &keysHandler{
-		timeout: time.Hour,
-		server:  server,
-		timer:   &dummyRaftTimer{},
+		timeout:     time.Hour,
+		server:      server,
+		clusterInfo: &fakeCluster{id: 1},
+		timer:       &dummyRaftTimer{},
 	}
 	go func() {
 		ec <- &store.Event{
@@ -1189,6 +1325,11 @@ func TestServeKeysWatch(t *testing.T) {
 
 	if rw.Code != wcode {
 		t.Errorf("got code=%d, want %d", rw.Code, wcode)
+	}
+	gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+	wcid := h.clusterInfo.ID().String()
+	if gcid != wcid {
+		t.Errorf("cid = %s, want %s", gcid, wcid)
 	}
 	g := rw.Body.String()
 	if g != wbody {
@@ -1497,5 +1638,74 @@ func TestTrimNodeExternPrefix(t *testing.T) {
 		if !reflect.DeepEqual(n, tt.wn) {
 			t.Errorf("#%d: node = %+v, want %+v", i, n, tt.wn)
 		}
+	}
+}
+
+func TestTrimPrefix(t *testing.T) {
+	tests := []struct {
+		in     string
+		prefix string
+		w      string
+	}{
+		{"/v2/members", "/v2/members", ""},
+		{"/v2/members/", "/v2/members", ""},
+		{"/v2/members/foo", "/v2/members", "foo"},
+	}
+	for i, tt := range tests {
+		if g := trimPrefix(tt.in, tt.prefix); g != tt.w {
+			t.Errorf("#%d: trimPrefix = %q, want %q", i, g, tt.w)
+		}
+	}
+}
+
+func TestNewMemberCollection(t *testing.T) {
+	fixture := []*etcdserver.Member{
+		&etcdserver.Member{
+			ID:             12,
+			Attributes:     etcdserver.Attributes{ClientURLs: []string{"http://localhost:8080", "http://localhost:8081"}},
+			RaftAttributes: etcdserver.RaftAttributes{PeerURLs: []string{"http://localhost:8082", "http://localhost:8083"}},
+		},
+		&etcdserver.Member{
+			ID:             13,
+			Attributes:     etcdserver.Attributes{ClientURLs: []string{"http://localhost:9090", "http://localhost:9091"}},
+			RaftAttributes: etcdserver.RaftAttributes{PeerURLs: []string{"http://localhost:9092", "http://localhost:9093"}},
+		},
+	}
+	got := newMemberCollection(fixture)
+
+	want := httptypes.MemberCollection([]httptypes.Member{
+		httptypes.Member{
+			ID:         "c",
+			ClientURLs: []string{"http://localhost:8080", "http://localhost:8081"},
+			PeerURLs:   []string{"http://localhost:8082", "http://localhost:8083"},
+		},
+		httptypes.Member{
+			ID:         "d",
+			ClientURLs: []string{"http://localhost:9090", "http://localhost:9091"},
+			PeerURLs:   []string{"http://localhost:9092", "http://localhost:9093"},
+		},
+	})
+
+	if !reflect.DeepEqual(&want, got) {
+		t.Fatalf("newMemberCollection failure: want=%#v, got=%#v", &want, got)
+	}
+}
+
+func TestNewMember(t *testing.T) {
+	fixture := &etcdserver.Member{
+		ID:             12,
+		Attributes:     etcdserver.Attributes{ClientURLs: []string{"http://localhost:8080", "http://localhost:8081"}},
+		RaftAttributes: etcdserver.RaftAttributes{PeerURLs: []string{"http://localhost:8082", "http://localhost:8083"}},
+	}
+	got := newMember(fixture)
+
+	want := httptypes.Member{
+		ID:         "c",
+		ClientURLs: []string{"http://localhost:8080", "http://localhost:8081"},
+		PeerURLs:   []string{"http://localhost:8082", "http://localhost:8083"},
+	}
+
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("newMember failure: want=%#v, got=%#v", want, got)
 	}
 }

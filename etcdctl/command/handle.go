@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package command
 
 import (
@@ -14,6 +30,7 @@ import (
 
 type handlerFunc func(*cli.Context, *etcd.Client) (*etcd.Response, error)
 type printFunc func(*etcd.Response, string)
+type contextualPrintFunc func(*cli.Context, *etcd.Response, string)
 
 // dumpCURL blindly dumps all curl output to os.Stderr
 func dumpCURL(client *etcd.Client) {
@@ -36,11 +53,7 @@ func createHttpPath(addr string) (string, error) {
 	return u.String(), nil
 }
 
-// rawhandle wraps the command function handlers and sets up the
-// environment but performs no output formatting.
-func rawhandle(c *cli.Context, fn handlerFunc) (*etcd.Response, error) {
-	sync := !c.GlobalBool("no-sync")
-
+func getPeersFlagValue(c *cli.Context) []string {
 	peerstr := c.GlobalString("peers")
 
 	// Use an environment variable if nothing was supplied on the
@@ -54,7 +67,15 @@ func rawhandle(c *cli.Context, fn handlerFunc) (*etcd.Response, error) {
 		peerstr = "127.0.0.1:4001"
 	}
 
-	peers := strings.Split(peerstr, ",")
+	return strings.Split(peerstr, ",")
+}
+
+// rawhandle wraps the command function handlers and sets up the
+// environment but performs no output formatting.
+func rawhandle(c *cli.Context, fn handlerFunc) (*etcd.Response, error) {
+	sync := !c.GlobalBool("no-sync")
+
+	peers := getPeersFlagValue(c)
 
 	// If no sync, create http path for each peer address
 	if !sync {
@@ -103,6 +124,19 @@ func handlePrint(c *cli.Context, fn handlerFunc, pFn printFunc) {
 
 	if resp != nil && pFn != nil {
 		pFn(resp, c.GlobalString("output"))
+	}
+}
+
+// Just like handlePrint but also passed the context of the command
+func handleContextualPrint(c *cli.Context, fn handlerFunc, pFn contextualPrintFunc) {
+	resp, err := rawhandle(c, fn)
+
+	if err != nil {
+		handleError(ErrorFromEtcd, err)
+	}
+
+	if resp != nil && pFn != nil {
+		pFn(c, resp, c.GlobalString("output"))
 	}
 }
 

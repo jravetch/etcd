@@ -24,11 +24,12 @@ import (
 	"time"
 
 	etcdErr "github.com/coreos/etcd/error"
+	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
 )
 
 const (
 	// time to wait for response from EtcdServer requests
-	defaultServerTimeout = 500 * time.Millisecond
+	defaultServerTimeout = 5 * time.Minute
 
 	// time to wait for a Watch request
 	defaultWatchTimeout = 5 * time.Minute
@@ -43,11 +44,15 @@ func writeError(w http.ResponseWriter, err error) {
 	if err == nil {
 		return
 	}
-	log.Println(err)
-	if e, ok := err.(*etcdErr.Error); ok {
-		e.Write(w)
-	} else {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	switch e := err.(type) {
+	case *etcdErr.Error:
+		e.WriteTo(w)
+	case *httptypes.HTTPError:
+		e.WriteTo(w)
+	default:
+		log.Printf("etcdhttp: unexpected error: %v", err)
+		herr := httptypes.NewHTTPError(http.StatusInternalServerError, "Internal Server Error")
+		herr.WriteTo(w)
 	}
 }
 

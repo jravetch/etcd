@@ -41,44 +41,30 @@ var (
 	ErrKeyExists   = errors.New("client: key already exists")
 )
 
-func NewKeysAPI(tr *http.Transport, ep string, to time.Duration) (KeysAPI, error) {
-	return newHTTPKeysAPIWithPrefix(tr, ep, to, DefaultV2KeysPrefix)
-}
-
-func NewDiscoveryKeysAPI(tr *http.Transport, ep string, to time.Duration) (KeysAPI, error) {
-	return newHTTPKeysAPIWithPrefix(tr, ep, to, "")
-}
-
-func newHTTPKeysAPIWithPrefix(tr *http.Transport, ep string, to time.Duration, prefix string) (*httpKeysAPI, error) {
-	u, err := url.Parse(ep)
-	if err != nil {
-		return nil, err
-	}
-
-	u.Path = path.Join(u.Path, prefix)
-
-	c := &httpClient{
-		transport: tr,
-		endpoint:  *u,
-		timeout:   to,
-	}
-
-	kAPI := httpKeysAPI{
+func NewKeysAPI(c HTTPClient) KeysAPI {
+	return &httpKeysAPI{
 		client: c,
+		prefix: DefaultV2KeysPrefix,
 	}
+}
 
-	return &kAPI, nil
+func NewDiscoveryKeysAPI(c HTTPClient) KeysAPI {
+	return &httpKeysAPI{
+		client: c,
+		prefix: "",
+	}
 }
 
 type KeysAPI interface {
-	Create(key, value string, ttl time.Duration) (*Response, error)
-	Get(key string) (*Response, error)
+	Create(ctx context.Context, key, value string, ttl time.Duration) (*Response, error)
+	Get(ctx context.Context, key string) (*Response, error)
+
 	Watch(key string, idx uint64) Watcher
 	RecursiveWatch(key string, idx uint64) Watcher
 }
 
 type Watcher interface {
-	Next() (*Response, error)
+	Next(context.Context) (*Response, error)
 }
 
 type Response struct {
@@ -101,45 +87,49 @@ func (n *Node) String() string {
 }
 
 type httpKeysAPI struct {
-	client *httpClient
+	client HTTPClient
+	prefix string
 }
 
-func (k *httpKeysAPI) Create(key, val string, ttl time.Duration) (*Response, error) {
+func (k *httpKeysAPI) Create(ctx context.Context, key, val string, ttl time.Duration) (*Response, error) {
 	create := &createAction{
-		Key:   key,
-		Value: val,
+		Prefix: k.prefix,
+		Key:    key,
+		Value:  val,
 	}
 	if ttl >= 0 {
 		uttl := uint64(ttl.Seconds())
 		create.TTL = &uttl
 	}
 
-	httpresp, body, err := k.client.doWithTimeout(create)
+	resp, body, err := k.client.Do(ctx, create)
 	if err != nil {
 		return nil, err
 	}
 
-	return unmarshalHTTPResponse(httpresp.StatusCode, body)
+	return unmarshalHTTPResponse(resp.StatusCode, body)
 }
 
-func (k *httpKeysAPI) Get(key string) (*Response, error) {
+func (k *httpKeysAPI) Get(ctx context.Context, key string) (*Response, error) {
 	get := &getAction{
+		Prefix:    k.prefix,
 		Key:       key,
 		Recursive: false,
 	}
 
-	httpresp, body, err := k.client.doWithTimeout(get)
+	resp, body, err := k.client.Do(ctx, get)
 	if err != nil {
 		return nil, err
 	}
 
-	return unmarshalHTTPResponse(httpresp.StatusCode, body)
+	return unmarshalHTTPResponse(resp.StatusCode, body)
 }
 
 func (k *httpKeysAPI) Watch(key string, idx uint64) Watcher {
 	return &httpWatcher{
 		client: k.client,
 		nextWait: waitAction{
+			Prefix:    k.prefix,
 			Key:       key,
 			WaitIndex: idx,
 			Recursive: false,
@@ -151,6 +141,7 @@ func (k *httpKeysAPI) RecursiveWatch(key string, idx uint64) Watcher {
 	return &httpWatcher{
 		client: k.client,
 		nextWait: waitAction{
+			Prefix:    k.prefix,
 			Key:       key,
 			WaitIndex: idx,
 			Recursive: true,
@@ -159,13 +150,12 @@ func (k *httpKeysAPI) RecursiveWatch(key string, idx uint64) Watcher {
 }
 
 type httpWatcher struct {
-	client   *httpClient
+	client   HTTPClient
 	nextWait waitAction
 }
 
-func (hw *httpWatcher) Next() (*Response, error) {
-	//TODO(bcwaldon): This needs to be cancellable by the calling user
-	httpresp, body, err := hw.client.do(context.Background(), &hw.nextWait)
+func (hw *httpWatcher) Next(ctx context.Context) (*Response, error) {
+	httpresp, body, err := hw.client.Do(ctx, &hw.nextWait)
 	if err != nil {
 		return nil, err
 	}
@@ -179,21 +169,24 @@ func (hw *httpWatcher) Next() (*Response, error) {
 	return resp, nil
 }
 
-// v2KeysURL forms a URL representing the location of a key. The provided
-// endpoint must be the root of the etcd keys API. For example, a valid
-// endpoint probably has the path "/v2/keys".
-func v2KeysURL(ep url.URL, key string) *url.URL {
-	ep.Path = path.Join(ep.Path, key)
+// v2KeysURL forms a URL representing the location of a key.
+// The endpoint argument represents the base URL of an etcd
+// server. The prefix is the path needed to route from the
+// provided endpoint's path to the root of the keys API
+// (typically "/v2/keys").
+func v2KeysURL(ep url.URL, prefix, key string) *url.URL {
+	ep.Path = path.Join(ep.Path, prefix, key)
 	return &ep
 }
 
 type getAction struct {
+	Prefix    string
 	Key       string
 	Recursive bool
 }
 
-func (g *getAction) httpRequest(ep url.URL) *http.Request {
-	u := v2KeysURL(ep, g.Key)
+func (g *getAction) HTTPRequest(ep url.URL) *http.Request {
+	u := v2KeysURL(ep, g.Prefix, g.Key)
 
 	params := u.Query()
 	params.Set("recursive", strconv.FormatBool(g.Recursive))
@@ -204,13 +197,14 @@ func (g *getAction) httpRequest(ep url.URL) *http.Request {
 }
 
 type waitAction struct {
+	Prefix    string
 	Key       string
 	WaitIndex uint64
 	Recursive bool
 }
 
-func (w *waitAction) httpRequest(ep url.URL) *http.Request {
-	u := v2KeysURL(ep, w.Key)
+func (w *waitAction) HTTPRequest(ep url.URL) *http.Request {
+	u := v2KeysURL(ep, w.Prefix, w.Key)
 
 	params := u.Query()
 	params.Set("wait", "true")
@@ -223,13 +217,14 @@ func (w *waitAction) httpRequest(ep url.URL) *http.Request {
 }
 
 type createAction struct {
-	Key   string
-	Value string
-	TTL   *uint64
+	Prefix string
+	Key    string
+	Value  string
+	TTL    *uint64
 }
 
-func (c *createAction) httpRequest(ep url.URL) *http.Request {
-	u := v2KeysURL(ep, c.Key)
+func (c *createAction) HTTPRequest(ep url.URL) *http.Request {
+	u := v2KeysURL(ep, c.Prefix, c.Key)
 
 	params := u.Query()
 	params.Set("prevExist", "false")

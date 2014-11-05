@@ -37,7 +37,69 @@ func nextEnts(r *raft) (ents []pb.Entry) {
 
 type Interface interface {
 	Step(m pb.Message) error
-	ReadMessages() []pb.Message
+	readMessages() []pb.Message
+}
+
+func (r *raft) readMessages() []pb.Message {
+	msgs := r.msgs
+	r.msgs = make([]pb.Message, 0)
+
+	return msgs
+}
+
+func TestProgressMaybeDecr(t *testing.T) {
+	tests := []struct {
+		m  uint64
+		n  uint64
+		to uint64
+
+		w  bool
+		wn uint64
+	}{
+		{
+			// match != 0 is always false
+			1, 0, 0, false, 0,
+		},
+		{
+			// match != 0 is always false
+			5, 10, 9, false, 10,
+		},
+		{
+			// next-1 != to is always false
+			0, 0, 0, false, 0,
+		},
+		{
+			// next-1 != to is always false
+			0, 10, 5, false, 10,
+		},
+		{
+			// next>1 = decremented by 1
+			0, 10, 9, true, 9,
+		},
+		{
+			// next>1 = decremented by 1
+			0, 2, 1, true, 1,
+		},
+		{
+			// next<=1 = reset to 1
+			0, 1, 0, true, 1,
+		},
+	}
+	for i, tt := range tests {
+		p := &progress{
+			match: tt.m,
+			next:  tt.n,
+		}
+		if g := p.maybeDecrTo(tt.to); g != tt.w {
+			t.Errorf("#%d: maybeDecrTo=%t, want %t", i, g, tt.w)
+		}
+		if gm := p.match; gm != tt.m {
+			t.Errorf("#%d: match=%d, want %d", i, gm, tt.m)
+		}
+		if gn := p.next; gn != tt.wn {
+			t.Errorf("#%d: next=%d, want %d", i, gn, tt.wn)
+		}
+	}
 }
 
 func TestLeaderElection(t *testing.T) {
@@ -273,7 +335,7 @@ func TestCandidateConcede(t *testing.T) {
 	tt.recover()
 
 	data := []byte("force follower")
-	// send a proposal to 2 to flush out a msgApp to 0
+	// send a proposal to 2 to flush out a MsgApp to 0
 	tt.send(pb.Message{From: 3, To: 3, Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
 
 	a := tt.peers[1].(*raft)
@@ -602,7 +664,7 @@ func TestHandleMsgApp(t *testing.T) {
 		if sm.raftLog.committed != tt.wCommit {
 			t.Errorf("#%d: committed = %d, want %d", i, sm.raftLog.committed, tt.wCommit)
 		}
-		m := sm.ReadMessages()
+		m := sm.readMessages()
 		if len(m) != 1 {
 			t.Fatalf("#%d: msg = nil, want 1", i)
 		}
@@ -662,7 +724,7 @@ func TestRecvMsgVote(t *testing.T) {
 
 		sm.Step(pb.Message{Type: pb.MsgVote, From: 2, Index: tt.i, LogTerm: tt.term})
 
-		msgs := sm.ReadMessages()
+		msgs := sm.readMessages()
 		if g := len(msgs); g != 1 {
 			t.Fatalf("#%d: len(msgs) = %d, want 1", i, g)
 			continue
@@ -803,7 +865,7 @@ func TestLeaderAppResp(t *testing.T) {
 		sm.raftLog = &raftLog{ents: []pb.Entry{{}, {Term: 0}, {Term: 1}}}
 		sm.becomeCandidate()
 		sm.becomeLeader()
-		sm.ReadMessages()
+		sm.readMessages()
 		sm.Step(pb.Message{From: 2, Type: pb.MsgAppResp, Index: tt.index, Term: sm.Term, Reject: tt.reject})
 
 		p := sm.prs[2]
@@ -814,7 +876,7 @@ func TestLeaderAppResp(t *testing.T) {
 			t.Errorf("#%d next = %d, want %d", i, p.next, tt.wnext)
 		}
 
-		msgs := sm.ReadMessages()
+		msgs := sm.readMessages()
 
 		if len(msgs) != tt.wmsgNum {
 			t.Errorf("#%d msgNum = %d, want %d", i, len(msgs), tt.wmsgNum)
@@ -831,7 +893,7 @@ func TestLeaderAppResp(t *testing.T) {
 }
 
 // When the leader receives a heartbeat tick, it should
-// send a msgApp with m.Index = 0, m.LogTerm=0 and empty entries.
+// send a MsgApp with m.Index = 0, m.LogTerm=0 and empty entries.
 func TestBcastBeat(t *testing.T) {
 	offset := uint64(1000)
 	// make a state machine with log.offset = 1000
@@ -851,9 +913,9 @@ func TestBcastBeat(t *testing.T) {
 	}
 
 	sm.Step(pb.Message{Type: pb.MsgBeat})
-	msgs := sm.ReadMessages()
+	msgs := sm.readMessages()
 	if len(msgs) != 2 {
-		t.Fatalf("len(msgs) = %v, want 1", len(msgs))
+		t.Fatalf("len(msgs) = %v, want 2", len(msgs))
 	}
 	tomap := map[uint64]bool{2: true, 3: true}
 	for i, m := range msgs {
@@ -877,14 +939,14 @@ func TestBcastBeat(t *testing.T) {
 	}
 }
 
-// tests the output of the statemachine when receiving msgBeat
+// tests the output of the statemachine when receiving MsgBeat
 func TestRecvMsgBeat(t *testing.T) {
 	tests := []struct {
 		state StateType
 		wMsg  int
 	}{
 		{StateLeader, 2},
-		// candidate and follower should ignore msgBeat
+		// candidate and follower should ignore MsgBeat
 		{StateCandidate, 0},
 		{StateFollower, 0},
 	}
@@ -904,7 +966,7 @@ func TestRecvMsgBeat(t *testing.T) {
 		}
 		sm.Step(pb.Message{From: 1, To: 1, Type: pb.MsgBeat})
 
-		msgs := sm.ReadMessages()
+		msgs := sm.readMessages()
 		if len(msgs) != tt.wMsg {
 			t.Errorf("%d: len(msgs) = %d, want %d", i, len(msgs), tt.wMsg)
 		}
@@ -967,7 +1029,7 @@ func TestProvideSnap(t *testing.T) {
 	sm.prs[2].next = sm.raftLog.offset
 
 	sm.Step(pb.Message{From: 2, To: 1, Type: pb.MsgAppResp, Index: sm.prs[2].next - 1, Reject: true})
-	msgs := sm.ReadMessages()
+	msgs := sm.readMessages()
 	if len(msgs) != 1 {
 		t.Fatalf("len(msgs) = %d, want 1", len(msgs))
 	}
@@ -1168,13 +1230,10 @@ type network struct {
 // newNetwork initializes a network from peers.
 // A nil node will be replaced with a new *stateMachine.
 // A *stateMachine will get its k, id.
-// When using stateMachine, the address list is always [0, n).
+// When using stateMachine, the address list is always [1, n].
 func newNetwork(peers ...Interface) *network {
 	size := len(peers)
-	peerAddrs := make([]uint64, size)
-	for i := 0; i < size; i++ {
-		peerAddrs[i] = 1 + uint64(i)
-	}
+	peerAddrs := idsBySize(size)
 
 	npeers := make(map[uint64]Interface, size)
 
@@ -1210,7 +1269,7 @@ func (nw *network) send(msgs ...pb.Message) {
 		m := msgs[0]
 		p := nw.peers[m.To]
 		p.Step(m)
-		msgs = append(msgs[1:], nw.filter(p.ReadMessages())...)
+		msgs = append(msgs[1:], nw.filter(p.readMessages())...)
 	}
 }
 
@@ -1270,6 +1329,14 @@ type connem struct {
 type blackHole struct{}
 
 func (blackHole) Step(pb.Message) error      { return nil }
-func (blackHole) ReadMessages() []pb.Message { return nil }
+func (blackHole) readMessages() []pb.Message { return nil }
 
 var nopStepper = &blackHole{}
+
+func idsBySize(size int) []uint64 {
+	ids := make([]uint64, size)
+	for i := 0; i < size; i++ {
+		ids[i] = 1 + uint64(i)
+	}
+	return ids
+}

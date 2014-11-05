@@ -29,8 +29,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
 	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/jonboulle/clockwork"
 	"github.com/coreos/etcd/client"
+	"github.com/coreos/etcd/pkg/types"
 )
 
 var (
@@ -51,18 +53,41 @@ const (
 )
 
 type Discoverer interface {
+	// Discover connects to a discovery service and retrieves a string
+	// describing an etcd cluster, and any error encountered.
 	Discover() (string, error)
 }
 
 type discovery struct {
 	cluster string
-	id      uint64
+	id      types.ID
 	config  string
 	c       client.KeysAPI
 	retries uint
 	url     *url.URL
 
 	clock clockwork.Clock
+}
+
+type proxyDiscovery struct {
+	*discovery
+}
+
+// New returns a Discoverer which will connect to the discovery service at
+// the given url, and register the server represented by the given id and
+// config to the cluster during the discovery process
+func New(durl string, id types.ID, config string) (Discoverer, error) {
+	return newDiscovery(durl, id, config)
+}
+
+// ProxyNew returns a Discoverer which will connect to the discovery service
+// at the given url and retrieve a string describing the cluster
+func ProxyNew(durl string) (Discoverer, error) {
+	d, err := newDiscovery(durl, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	return &proxyDiscovery{d}, nil
 }
 
 // proxyFuncFromEnv builds a proxy function if the appropriate environment
@@ -94,7 +119,7 @@ func proxyFuncFromEnv() (func(*http.Request) (*url.URL, error), error) {
 	return http.ProxyURL(proxyURL), nil
 }
 
-func New(durl string, id uint64, config string) (Discoverer, error) {
+func newDiscovery(durl string, id types.ID, config string) (*discovery, error) {
 	u, err := url.Parse(durl)
 	if err != nil {
 		return nil, err
@@ -105,15 +130,16 @@ func New(durl string, id uint64, config string) (Discoverer, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := client.NewDiscoveryKeysAPI(&http.Transport{Proxy: pf}, u.String(), client.DefaultRequestTimeout)
+	c, err := client.NewHTTPClient(&http.Transport{Proxy: pf}, []string{u.String()})
 	if err != nil {
 		return nil, err
 	}
+	dc := client.NewDiscoveryKeysAPI(c)
 	return &discovery{
 		cluster: token,
 		id:      id,
 		config:  config,
-		c:       c,
+		c:       dc,
 		url:     u,
 		clock:   clockwork.NewRealClock(),
 	}, nil
@@ -147,22 +173,42 @@ func (d *discovery) Discover() (string, error) {
 	return nodesToCluster(all), nil
 }
 
+func (pd *proxyDiscovery) Discover() (string, error) {
+	nodes, size, err := pd.checkCluster()
+	if err != nil {
+		if err == ErrFullCluster {
+			return nodesToCluster(nodes), nil
+		}
+		return "", err
+	}
+
+	all, err := pd.waitNodes(nodes, size)
+	if err != nil {
+		return "", err
+	}
+	return nodesToCluster(all), nil
+}
+
 func (d *discovery) createSelf() error {
-	resp, err := d.c.Create(d.selfKey(), d.config, -1)
+	ctx, cancel := context.WithTimeout(context.Background(), client.DefaultRequestTimeout)
+	resp, err := d.c.Create(ctx, d.selfKey(), d.config, -1)
+	cancel()
 	if err != nil {
 		return err
 	}
 
 	// ensure self appears on the server we connected to
 	w := d.c.Watch(d.selfKey(), resp.Node.CreatedIndex)
-	_, err = w.Next()
+	_, err = w.Next(context.Background())
 	return err
 }
 
 func (d *discovery) checkCluster() (client.Nodes, int, error) {
 	configKey := path.Join("/", d.cluster, "_config")
+	ctx, cancel := context.WithTimeout(context.Background(), client.DefaultRequestTimeout)
 	// find cluster size
-	resp, err := d.c.Get(path.Join(configKey, "size"))
+	resp, err := d.c.Get(ctx, path.Join(configKey, "size"))
+	cancel()
 	if err != nil {
 		if err == client.ErrKeyNoExist {
 			return nil, 0, ErrSizeNotFound
@@ -177,7 +223,9 @@ func (d *discovery) checkCluster() (client.Nodes, int, error) {
 		return nil, 0, ErrBadSizeKey
 	}
 
-	resp, err = d.c.Get(d.cluster)
+	ctx, cancel = context.WithTimeout(context.Background(), client.DefaultRequestTimeout)
+	resp, err = d.c.Get(ctx, d.cluster)
+	cancel()
 	if err != nil {
 		if err == client.ErrTimeout {
 			return d.checkClusterRetry()
@@ -187,7 +235,7 @@ func (d *discovery) checkCluster() (client.Nodes, int, error) {
 	nodes := make(client.Nodes, 0)
 	// append non-config keys to nodes
 	for _, n := range resp.Node.Nodes {
-		if !strings.Contains(n.Key, configKey) {
+		if !(path.Base(n.Key) == path.Base(configKey)) {
 			nodes = append(nodes, n)
 		}
 	}
@@ -197,11 +245,11 @@ func (d *discovery) checkCluster() (client.Nodes, int, error) {
 
 	// find self position
 	for i := range nodes {
-		if strings.Contains(nodes[i].Key, d.selfKey()) {
+		if path.Base(nodes[i].Key) == path.Base(d.selfKey()) {
 			break
 		}
 		if i >= size-1 {
-			return nil, size, ErrFullCluster
+			return nodes[:size], size, ErrFullCluster
 		}
 	}
 	return nodes, size, nil
@@ -241,22 +289,33 @@ func (d *discovery) waitNodes(nodes client.Nodes, size int) (client.Nodes, error
 	w := d.c.RecursiveWatch(d.cluster, nodes[len(nodes)-1].ModifiedIndex+1)
 	all := make(client.Nodes, len(nodes))
 	copy(all, nodes)
+	for _, n := range all {
+		if path.Base(n.Key) == path.Base(d.selfKey()) {
+			log.Printf("discovery: found self %s in the cluster", path.Base(d.selfKey()))
+		} else {
+			log.Printf("discovery: found peer %s in the cluster", path.Base(n.Key))
+		}
+	}
+
 	// wait for others
 	for len(all) < size {
-		resp, err := w.Next()
+		log.Printf("discovery: found %d peer(s), waiting for %d more", len(all), size-len(all))
+		resp, err := w.Next(context.Background())
 		if err != nil {
 			if err == client.ErrTimeout {
 				return d.waitNodesRetry()
 			}
 			return nil, err
 		}
+		log.Printf("discovery: found peer %s in the cluster", path.Base(resp.Node.Key))
 		all = append(all, resp.Node)
 	}
+	log.Printf("discovery: found %d needed peer(s)", len(all))
 	return all, nil
 }
 
 func (d *discovery) selfKey() string {
-	return path.Join("/", d.cluster, fmt.Sprintf("%d", d.id))
+	return path.Join("/", d.cluster, d.id.String())
 }
 
 func nodesToCluster(ns client.Nodes) string {

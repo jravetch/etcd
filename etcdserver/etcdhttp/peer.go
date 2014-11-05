@@ -21,10 +21,10 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"strconv"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
 	"github.com/coreos/etcd/etcdserver"
+	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft/raftpb"
 )
 
@@ -63,7 +63,7 @@ func (h *raftHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wcid := strconv.FormatUint(h.clusterInfo.ID(), 16)
+	wcid := h.clusterInfo.ID().String()
 	w.Header().Set("X-Etcd-Cluster-ID", wcid)
 
 	gcid := r.Header.Get("X-Etcd-Cluster-ID")
@@ -86,17 +86,17 @@ func (h *raftHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.server.Process(context.TODO(), m); err != nil {
-		log.Println("etcdhttp: error processing raft message:", err)
 		switch err {
 		case etcdserver.ErrRemoved:
-			http.Error(w, "cannot process message from removed node", http.StatusForbidden)
+			log.Printf("etcdhttp: reject message from removed member %s", types.ID(m.From).String())
+			http.Error(w, "cannot process message from removed member", http.StatusForbidden)
 		default:
 			writeError(w, err)
 		}
 		return
 	}
 	if m.Type == raftpb.MsgApp {
-		h.stats.UpdateRecvApp(m.From, r.ContentLength)
+		h.stats.UpdateRecvApp(types.ID(m.From), r.ContentLength)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -109,8 +109,7 @@ func (h *peerMembersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !allowMethod(w, r.Method, "GET") {
 		return
 	}
-	cid := strconv.FormatUint(h.clusterInfo.ID(), 16)
-	w.Header().Set("X-Etcd-Cluster-ID", cid)
+	w.Header().Set("X-Etcd-Cluster-ID", h.clusterInfo.ID().String())
 
 	if r.URL.Path != peerMembersPrefix {
 		http.Error(w, "bad path", http.StatusBadRequest)

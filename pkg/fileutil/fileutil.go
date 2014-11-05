@@ -14,42 +14,24 @@
    limitations under the License.
 */
 
-package flags
+package fileutil
 
 import (
-	"errors"
+	"io/ioutil"
+	"os"
+	"path"
 )
 
 const (
-	ProxyValueOff      = "off"
-	ProxyValueReadonly = "readonly"
-	ProxyValueOn       = "on"
+	privateFileMode = 0600
 )
 
-var (
-	ProxyValues = []string{
-		ProxyValueOff,
-		ProxyValueReadonly,
-		ProxyValueOn,
+// IsDirWriteable checks if dir is writable by writing and removing a file
+// to dir. It returns nil if dir is writable.
+func IsDirWriteable(dir string) error {
+	f := path.Join(dir, ".touch")
+	if err := ioutil.WriteFile(f, []byte(""), privateFileMode); err != nil {
+		return err
 	}
-)
-
-// ProxyFlag implements the flag.Value interface.
-type Proxy string
-
-// Set verifies the argument to be a valid member of proxyFlagValues
-// before setting the underlying flag value.
-func (pf *Proxy) Set(s string) error {
-	for _, v := range ProxyValues {
-		if s == v {
-			*pf = Proxy(s)
-			return nil
-		}
-	}
-
-	return errors.New("invalid value")
-}
-
-func (pf *Proxy) String() string {
-	return string(*pf)
+	return os.Remove(f)
 }

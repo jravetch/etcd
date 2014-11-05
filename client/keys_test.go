@@ -29,12 +29,14 @@ import (
 func TestV2KeysURLHelper(t *testing.T) {
 	tests := []struct {
 		endpoint url.URL
+		prefix   string
 		key      string
 		want     url.URL
 	}{
 		// key is empty, no problem
 		{
 			endpoint: url.URL{Scheme: "http", Host: "example.com", Path: "/v2/keys"},
+			prefix:   "",
 			key:      "",
 			want:     url.URL{Scheme: "http", Host: "example.com", Path: "/v2/keys"},
 		},
@@ -42,6 +44,7 @@ func TestV2KeysURLHelper(t *testing.T) {
 		// key is joined to path
 		{
 			endpoint: url.URL{Scheme: "http", Host: "example.com", Path: "/v2/keys"},
+			prefix:   "",
 			key:      "/foo/bar",
 			want:     url.URL{Scheme: "http", Host: "example.com", Path: "/v2/keys/foo/bar"},
 		},
@@ -49,6 +52,7 @@ func TestV2KeysURLHelper(t *testing.T) {
 		// key is joined to path when path is empty
 		{
 			endpoint: url.URL{Scheme: "http", Host: "example.com", Path: ""},
+			prefix:   "",
 			key:      "/foo/bar",
 			want:     url.URL{Scheme: "http", Host: "example.com", Path: "/foo/bar"},
 		},
@@ -56,6 +60,7 @@ func TestV2KeysURLHelper(t *testing.T) {
 		// Host field carries through with port
 		{
 			endpoint: url.URL{Scheme: "http", Host: "example.com:8080", Path: "/v2/keys"},
+			prefix:   "",
 			key:      "",
 			want:     url.URL{Scheme: "http", Host: "example.com:8080", Path: "/v2/keys"},
 		},
@@ -63,13 +68,21 @@ func TestV2KeysURLHelper(t *testing.T) {
 		// Scheme carries through
 		{
 			endpoint: url.URL{Scheme: "https", Host: "example.com", Path: "/v2/keys"},
+			prefix:   "",
 			key:      "",
 			want:     url.URL{Scheme: "https", Host: "example.com", Path: "/v2/keys"},
+		},
+		// Prefix is applied
+		{
+			endpoint: url.URL{Scheme: "https", Host: "example.com", Path: "/foo"},
+			prefix:   "/bar",
+			key:      "/baz",
+			want:     url.URL{Scheme: "https", Host: "example.com", Path: "/foo/bar/baz"},
 		},
 	}
 
 	for i, tt := range tests {
-		got := v2KeysURL(tt.endpoint, tt.key)
+		got := v2KeysURL(tt.endpoint, tt.prefix, tt.key)
 		if tt.want != *got {
 			t.Errorf("#%d: want=%#v, got=%#v", i, tt.want, *got)
 		}
@@ -104,7 +117,7 @@ func TestGetAction(t *testing.T) {
 			Key:       "/foo/bar",
 			Recursive: tt.recursive,
 		}
-		got := *f.httpRequest(ep)
+		got := *f.HTTPRequest(ep)
 
 		wantURL := wantURL
 		wantURL.RawQuery = tt.wantQuery
@@ -153,7 +166,7 @@ func TestWaitAction(t *testing.T) {
 			WaitIndex: tt.waitIndex,
 			Recursive: tt.recursive,
 		}
-		got := *f.httpRequest(ep)
+		got := *f.HTTPRequest(ep)
 
 		wantURL := wantURL
 		wantURL.RawQuery = tt.wantQuery
@@ -200,7 +213,7 @@ func TestCreateAction(t *testing.T) {
 			Value: tt.value,
 			TTL:   tt.ttl,
 		}
-		got := *f.httpRequest(ep)
+		got := *f.HTTPRequest(ep)
 
 		err := assertResponse(got, wantURL, wantHeader, []byte(tt.wantBody))
 		if err != nil {
@@ -224,7 +237,7 @@ func assertResponse(got http.Request, wantURL *url.URL, wantHeader http.Header, 
 		}
 	} else {
 		if wantBody == nil {
-			return fmt.Errorf("want.Body=%v got.Body=%v", wantBody, got.Body)
+			return fmt.Errorf("want.Body=%v got.Body=%s", wantBody, got.Body)
 		} else {
 			gotBytes, err := ioutil.ReadAll(got.Body)
 			if err != nil {
@@ -232,7 +245,7 @@ func assertResponse(got http.Request, wantURL *url.URL, wantHeader http.Header, 
 			}
 
 			if !reflect.DeepEqual(wantBody, gotBytes) {
-				return fmt.Errorf("want.Body=%v got.Body=%v", wantBody, gotBytes)
+				return fmt.Errorf("want.Body=%s got.Body=%s", wantBody, gotBytes)
 			}
 		}
 	}

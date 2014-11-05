@@ -40,29 +40,29 @@ const (
 )
 
 type ClusterInfo interface {
-	ID() uint64
+	ID() types.ID
 	ClientURLs() []string
 	// Members returns a slice of members sorted by their ID
 	Members() []*Member
-	Member(id uint64) *Member
+	Member(id types.ID) *Member
 }
 
 // Cluster is a list of Members that belong to the same raft cluster
 type Cluster struct {
-	id      uint64
-	name    string
-	members map[uint64]*Member
+	id      types.ID
+	token   string
+	members map[types.ID]*Member
 	// removed contains the ids of removed members in the cluster.
 	// removed id cannot be reused.
-	removed map[uint64]bool
+	removed map[types.ID]bool
 	store   store.Store
 }
 
-// NewClusterFromString returns Cluster through given clusterName and parsing
+// NewClusterFromString returns Cluster through given cluster token and parsing
 // members from a sets of names to IPs discovery formatted like:
 // mach0=http://1.1.1.1,mach0=http://2.2.2.2,mach1=http://3.3.3.3,mach2=http://4.4.4.4
-func NewClusterFromString(name string, cluster string) (*Cluster, error) {
-	c := newCluster(name)
+func NewClusterFromString(token string, cluster string) (*Cluster, error) {
+	c := newCluster(token)
 
 	v, err := url.ParseQuery(strings.Replace(cluster, ",", "&", -1))
 	if err != nil {
@@ -76,7 +76,7 @@ func NewClusterFromString(name string, cluster string) (*Cluster, error) {
 		if err := purls.Set(strings.Join(urls, ",")); err != nil {
 			return nil, err
 		}
-		m := NewMember(name, types.URLs(*purls), c.name, nil)
+		m := NewMember(name, types.URLs(*purls), c.token, nil)
 		if _, ok := c.members[m.ID]; ok {
 			return nil, fmt.Errorf("Member exists with identical ID %v", m)
 		}
@@ -86,8 +86,8 @@ func NewClusterFromString(name string, cluster string) (*Cluster, error) {
 	return c, nil
 }
 
-func NewClusterFromStore(name string, st store.Store) *Cluster {
-	c := newCluster(name)
+func NewClusterFromStore(token string, st store.Store) *Cluster {
+	c := newCluster(token)
 	c.store = st
 
 	e, err := c.store.Get(storeMembersPrefix, true, true)
@@ -113,14 +113,14 @@ func NewClusterFromStore(name string, st store.Store) *Cluster {
 		log.Panicf("get storeRemovedMembers should never fail: %v", err)
 	}
 	for _, n := range e.Node.Nodes {
-		c.removed[parseMemberID(n.Key)] = true
+		c.removed[mustParseMemberIDFromKey(n.Key)] = true
 	}
 
 	return c
 }
 
-func NewClusterFromMembers(name string, id uint64, membs []*Member) *Cluster {
-	c := newCluster(name)
+func NewClusterFromMembers(token string, id types.ID, membs []*Member) *Cluster {
+	c := newCluster(token)
 	c.id = id
 	for _, m := range membs {
 		c.members[m.ID] = m
@@ -128,15 +128,15 @@ func NewClusterFromMembers(name string, id uint64, membs []*Member) *Cluster {
 	return c
 }
 
-func newCluster(name string) *Cluster {
+func newCluster(token string) *Cluster {
 	return &Cluster{
-		name:    name,
-		members: make(map[uint64]*Member),
-		removed: make(map[uint64]bool),
+		token:   token,
+		members: make(map[types.ID]*Member),
+		removed: make(map[types.ID]bool),
 	}
 }
 
-func (c Cluster) ID() uint64 { return c.id }
+func (c Cluster) ID() types.ID { return c.id }
 
 func (c Cluster) Members() []*Member {
 	var sms SortableMemberSlice
@@ -153,7 +153,7 @@ func (s SortableMemberSlice) Len() int           { return len(s) }
 func (s SortableMemberSlice) Less(i, j int) bool { return s[i].ID < s[j].ID }
 func (s SortableMemberSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
-func (c *Cluster) Member(id uint64) *Member {
+func (c *Cluster) Member(id types.ID) *Member {
 	return c.members[id]
 }
 
@@ -164,7 +164,7 @@ func (c *Cluster) MemberByName(name string) *Member {
 	for _, m := range c.members {
 		if m.Name == name {
 			if memb != nil {
-				panic("two members with the given name exist in the cluster")
+				log.Panicf("two members with the given name %s exist", name)
 			}
 			memb = m
 		}
@@ -172,16 +172,16 @@ func (c *Cluster) MemberByName(name string) *Member {
 	return memb
 }
 
-func (c Cluster) MemberIDs() []uint64 {
-	var ids []uint64
+func (c Cluster) MemberIDs() []types.ID {
+	var ids []types.ID
 	for _, m := range c.members {
 		ids = append(ids, m.ID)
 	}
-	sort.Sort(types.Uint64Slice(ids))
+	sort.Sort(types.IDSlice(ids))
 	return ids
 }
 
-func (c *Cluster) IsIDRemoved(id uint64) bool {
+func (c *Cluster) IsIDRemoved(id types.ID) bool {
 	return c.removed[id]
 }
 
@@ -230,7 +230,7 @@ func (c Cluster) String() string {
 // cluster. If the validation fails, an error will be returned.
 func (c *Cluster) ValidateAndAssignIDs(membs []*Member) error {
 	if len(c.members) != len(membs) {
-		return fmt.Errorf("cannot update %v from %v because the member count is unequal", c.members, membs)
+		return fmt.Errorf("member count is unequal")
 	}
 	omembs := make([]*Member, 0)
 	for _, m := range c.members {
@@ -244,7 +244,7 @@ func (c *Cluster) ValidateAndAssignIDs(membs []*Member) error {
 		}
 		omembs[i].ID = membs[i].ID
 	}
-	c.members = make(map[uint64]*Member)
+	c.members = make(map[types.ID]*Member)
 	for _, m := range omembs {
 		c.members[m.ID] = m
 	}
@@ -255,13 +255,13 @@ func (c *Cluster) genID() {
 	mIDs := c.MemberIDs()
 	b := make([]byte, 8*len(mIDs))
 	for i, id := range mIDs {
-		binary.BigEndian.PutUint64(b[8*i:], id)
+		binary.BigEndian.PutUint64(b[8*i:], uint64(id))
 	}
 	hash := sha1.Sum(b)
-	c.id = binary.BigEndian.Uint64(hash[:8])
+	c.id = types.ID(binary.BigEndian.Uint64(hash[:8]))
 }
 
-func (c *Cluster) SetID(id uint64) { c.id = id }
+func (c *Cluster) SetID(id types.ID) { c.id = id }
 
 func (c *Cluster) SetStore(st store.Store) { c.store = st }
 
@@ -270,32 +270,32 @@ func (c *Cluster) SetStore(st store.Store) { c.store = st }
 func (c *Cluster) AddMember(m *Member) {
 	b, err := json.Marshal(m.RaftAttributes)
 	if err != nil {
-		log.Panicf("marshal error: %v", err)
+		log.Panicf("marshal raftAttributes should never fail: %v", err)
 	}
 	p := path.Join(memberStoreKey(m.ID), raftAttributesSuffix)
 	if _, err := c.store.Create(p, false, string(b), false, store.Permanent); err != nil {
-		log.Panicf("add raftAttributes should never fail: %v", err)
+		log.Panicf("create raftAttributes should never fail: %v", err)
 	}
 	b, err = json.Marshal(m.Attributes)
 	if err != nil {
-		log.Panicf("marshal error: %v", err)
+		log.Panicf("marshal attributes should never fail: %v", err)
 	}
 	p = path.Join(memberStoreKey(m.ID), attributesSuffix)
 	if _, err := c.store.Create(p, false, string(b), false, store.Permanent); err != nil {
-		log.Panicf("add attributes should never fail: %v", err)
+		log.Panicf("create attributes should never fail: %v", err)
 	}
 	c.members[m.ID] = m
 }
 
 // RemoveMember removes a member from the store.
 // The given id MUST exist, or the function panics.
-func (c *Cluster) RemoveMember(id uint64) {
+func (c *Cluster) RemoveMember(id types.ID) {
 	if _, err := c.store.Delete(memberStoreKey(id), true, true); err != nil {
-		log.Panicf("delete peer should never fail: %v", err)
+		log.Panicf("delete member should never fail: %v", err)
 	}
 	delete(c.members, id)
 	if _, err := c.store.Create(removedMemberStoreKey(id), false, "", false, store.Permanent); err != nil {
-		log.Panicf("creating RemovedMember should never fail: %v", err)
+		log.Panicf("create removedMember should never fail: %v", err)
 	}
 	c.removed[id] = true
 }
@@ -303,7 +303,7 @@ func (c *Cluster) RemoveMember(id uint64) {
 // nodeToMember builds member through a store node.
 // the child nodes of the given node should be sorted by key.
 func nodeToMember(n *store.NodeExtern) (*Member, error) {
-	m := &Member{ID: parseMemberID(n.Key)}
+	m := &Member{ID: mustParseMemberIDFromKey(n.Key)}
 	if len(n.Nodes) != 2 {
 		return m, fmt.Errorf("len(nodes) = %d, want 2", len(n.Nodes))
 	}

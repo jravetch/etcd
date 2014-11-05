@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package integration
 
 import (
@@ -127,6 +143,10 @@ func (c *cluster) Launch(t *testing.T) {
 	}
 }
 
+func (c *cluster) URL(i int) string {
+	return c.Members[i].ClientURLs[0].String()
+}
+
 func (c *cluster) Terminate(t *testing.T) {
 	for _, m := range c.Members {
 		m.Terminate(t)
@@ -156,9 +176,12 @@ type member struct {
 // Launch starts a member based on ServerConfig, PeerListeners
 // and ClientListeners.
 func (m *member) Launch(t *testing.T) {
-	m.s = etcdserver.NewServer(&m.ServerConfig)
+	var err error
+	if m.s, err = etcdserver.NewServer(&m.ServerConfig); err != nil {
+		t.Fatalf("failed to initialize the etcd server: %v", err)
+	}
 	m.s.Ticker = time.Tick(tickDuration)
-	m.s.SyncTicker = nil
+	m.s.SyncTicker = time.Tick(tickDuration)
 	m.s.Start()
 
 	for _, ln := range m.PeerListeners {
@@ -184,15 +207,16 @@ func (m *member) Stop(t *testing.T) {
 	panic("unimplemented")
 }
 
-// Start starts the member using preserved data dir.
+// Start starts the member using the preserved data dir.
 func (m *member) Start(t *testing.T) {
 	panic("unimplemented")
 }
 
-// Terminate stops the member and remove the data dir.
+// Terminate stops the member and removes the data dir.
 func (m *member) Terminate(t *testing.T) {
 	m.s.Stop()
 	for _, hs := range m.hss {
+		hs.CloseClientConnections()
 		hs.Close()
 	}
 	if err := os.RemoveAll(m.ServerConfig.DataDir); err != nil {

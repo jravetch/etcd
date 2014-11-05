@@ -14,17 +14,34 @@
    limitations under the License.
 */
 
-package pkg
+package flags
 
 import (
-	"runtime"
+	"testing"
 )
 
-// WARNING: This is a hack.
-// Remove this when we are able to block/check the status of the go-routines.
-func ForceGosched() {
-	// possibility enough to sched upto 10 go routines.
-	for i := 0; i < 10000; i++ {
-		runtime.Gosched()
+func TestStringsSet(t *testing.T) {
+	tests := []struct {
+		vals []string
+
+		val  string
+		pass bool
+	}{
+		// known values
+		{[]string{"abc", "def"}, "abc", true},
+		{[]string{"on", "off", "false"}, "on", true},
+
+		// unrecognized values
+		{[]string{"abc", "def"}, "ghi", false},
+		{[]string{"on", "off"}, "", false},
+		{[]string{}, "asdf", false},
+	}
+
+	for i, tt := range tests {
+		sf := NewStringsFlag(tt.vals...)
+		err := sf.Set(tt.val)
+		if tt.pass != (err == nil) {
+			t.Errorf("#%d: want pass=%t, but got err=%v", i, tt.pass, err)
+		}
 	}
 }

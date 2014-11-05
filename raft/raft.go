@@ -66,9 +66,8 @@ func (pr *progress) update(n uint64) {
 // maybeDecrTo returns false if the given to index comes from an out of order message.
 // Otherwise it decreases the progress next index and returns true.
 func (pr *progress) maybeDecrTo(to uint64) bool {
-	// the rejection must be stale if the
-	// progress has matched with follower
-	// or "to" does not match next - 1
+	// the rejection must be stale if the progress has matched with
+	// follower or "to" does not match next - 1
 	if pr.match != 0 || pr.next-1 != to {
 		return false
 	}
@@ -115,6 +114,7 @@ type raft struct {
 	elapsed          int // number of ticks since the last msg
 	heartbeatTimeout int
 	electionTimeout  int
+	rand             *rand.Rand
 	tick             func()
 	step             stepFunc
 }
@@ -123,7 +123,6 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int) *raft {
 	if id == None {
 		panic("cannot use none id")
 	}
-	rand.Seed(int64(id))
 	r := &raft{
 		id:               id,
 		lead:             None,
@@ -132,6 +131,7 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int) *raft {
 		electionTimeout:  election,
 		heartbeatTimeout: heartbeat,
 	}
+	r.rand = rand.New(rand.NewSource(int64(id)))
 	for _, p := range peers {
 		r.prs[p] = &progress{}
 	}
@@ -173,7 +173,7 @@ func (r *raft) poll(id uint64, v bool) (granted int) {
 // send persists state to stable storage and then sends to its mailbox.
 func (r *raft) send(m pb.Message) {
 	m.From = r.id
-	// do not attach term to msgProp
+	// do not attach term to MsgProp
 	// proposals are a way to forward to the leader and
 	// should be treated as local message.
 	if m.Type != pb.MsgProp {
@@ -200,7 +200,7 @@ func (r *raft) sendAppend(to uint64) {
 	r.send(m)
 }
 
-// sendHeartbeat sends an empty msgApp
+// sendHeartbeat sends an empty MsgApp
 func (r *raft) sendHeartbeat(to uint64) {
 	m := pb.Message{
 		To:   to,
@@ -209,7 +209,8 @@ func (r *raft) sendHeartbeat(to uint64) {
 	r.send(m)
 }
 
-// bcastAppend sends RRPC, with entries to all peers that are not up-to-date according to r.mis.
+// bcastAppend sends RRPC, with entries to all peers that are not up-to-date
+// according to the progress recorded in r.prs.
 func (r *raft) bcastAppend() {
 	for i := range r.prs {
 		if i == r.id {
@@ -268,7 +269,7 @@ func (r *raft) appendEntry(e pb.Entry) {
 	r.maybeCommit()
 }
 
-// tickElection is ran by followers and candidates after r.electionTimeout.
+// tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
 	if !r.promotable() {
 		r.elapsed = 0
@@ -281,7 +282,7 @@ func (r *raft) tickElection() {
 	}
 }
 
-// tickHeartbeat is ran by leaders to send a msgBeat after r.heartbeatTimeout.
+// tickHeartbeat is run by leaders to send a MsgBeat after r.heartbeatTimeout.
 func (r *raft) tickHeartbeat() {
 	r.elapsed++
 	if r.elapsed > r.heartbeatTimeout {
@@ -332,13 +333,6 @@ func (r *raft) becomeLeader() {
 	r.appendEntry(pb.Entry{Data: nil})
 }
 
-func (r *raft) ReadMessages() []pb.Message {
-	msgs := r.msgs
-	r.msgs = make([]pb.Message, 0)
-
-	return msgs
-}
-
 func (r *raft) campaign() {
 	r.becomeCandidate()
 	if r.q() == r.poll(r.id, true) {
@@ -348,8 +342,7 @@ func (r *raft) campaign() {
 		if i == r.id {
 			continue
 		}
-		lasti := r.raftLog.lastIndex()
-		r.send(pb.Message{To: i, Type: pb.MsgVote, Index: lasti, LogTerm: r.raftLog.term(lasti)})
+		r.send(pb.Message{To: i, Type: pb.MsgVote, Index: r.raftLog.lastIndex(), LogTerm: r.raftLog.lastTerm()})
 	}
 }
 
@@ -416,7 +409,7 @@ func stepLeader(r *raft, m pb.Message) {
 		r.bcastHeartbeat()
 	case pb.MsgProp:
 		if len(m.Entries) != 1 {
-			panic("unexpected length(entries) of a msgProp")
+			panic("unexpected length(entries) of a MsgProp")
 		}
 		e := m.Entries[0]
 		if e.Type == pb.EntryConfChange {
@@ -575,5 +568,5 @@ func (r *raft) isElectionTimeout() bool {
 	if d < 0 {
 		return false
 	}
-	return d > rand.Int()%r.electionTimeout
+	return d > r.rand.Int()%r.electionTimeout
 }
