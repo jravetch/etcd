@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -64,6 +65,7 @@ var (
 	ErrIDRemoved     = errors.New("etcdserver: ID removed")
 	ErrIDExists      = errors.New("etcdserver: ID exists")
 	ErrIDNotFound    = errors.New("etcdserver: ID not found")
+	ErrPeerURLexists = errors.New("etcdserver: peerURL exists")
 	ErrCanceled      = errors.New("etcdserver: request cancelled")
 	ErrTimeout       = errors.New("etcdserver: request timed out")
 
@@ -77,12 +79,17 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-type sendFunc func(m []raftpb.Message)
-
 type Response struct {
 	Event   *store.Event
 	Watcher store.Watcher
 	err     error
+}
+
+type Sender interface {
+	Send(m []raftpb.Message)
+	Add(m *Member)
+	Remove(id types.ID)
+	Stop()
 }
 
 type Storage interface {
@@ -155,11 +162,11 @@ type EtcdServer struct {
 	stats  *stats.ServerStats
 	lstats *stats.LeaderStats
 
-	// send specifies the send function for sending msgs to members. send
+	// sender specifies the sender to send msgs to members. sending msgs
 	// MUST NOT block. It is okay to drop messages, since clients should
 	// timeout and reissue their messages.  If send is nil, server will
 	// panic.
-	send sendFunc
+	sender Sender
 
 	storage Storage
 
@@ -186,8 +193,9 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 	var id types.ID
 	haveWAL := wal.Exist(cfg.WALDir())
 	switch {
-	case !haveWAL && cfg.ClusterState == ClusterStateValueExisting:
-		cl, err := GetClusterFromPeers(cfg.Cluster.PeerURLs())
+	case !haveWAL && !cfg.NewCluster:
+		us := getOtherPeerURLs(cfg.Cluster, cfg.Name)
+		cl, err := GetClusterFromPeers(us)
 		if err != nil {
 			return nil, fmt.Errorf("cannot fetch cluster info from peer urls: %v", err)
 		}
@@ -197,17 +205,13 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		cfg.Cluster.SetID(cl.id)
 		cfg.Cluster.SetStore(st)
 		id, n, w = startNode(cfg, nil)
-	case !haveWAL && cfg.ClusterState == ClusterStateValueNew:
+	case !haveWAL && cfg.NewCluster:
 		if err := cfg.VerifyBootstrapConfig(); err != nil {
 			return nil, err
 		}
 		m := cfg.Cluster.MemberByName(cfg.Name)
 		if cfg.ShouldDiscover() {
-			d, err := discovery.New(cfg.DiscoveryURL, m.ID, cfg.Cluster.String())
-			if err != nil {
-				return nil, fmt.Errorf("cannot init discovery %v", err)
-			}
-			s, err := d.Discover()
+			s, err := discovery.JoinCluster(cfg.DiscoveryURL, cfg.DiscoveryProxy, m.ID, cfg.Cluster.String())
 			if err != nil {
 				return nil, err
 			}
@@ -233,7 +237,14 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 			index = snapshot.Index
 		}
 		cfg.Cluster = NewClusterFromStore(cfg.Cluster.token, st)
-		id, n, w = restartNode(cfg, index, snapshot)
+		if snapshot != nil {
+			log.Printf("etcdserver: loaded peers from snapshot: %s", cfg.Cluster)
+		}
+		if !cfg.ForceNewCluster {
+			id, n, w = restartNode(cfg, index, snapshot)
+		} else {
+			id, n, w = restartAsStandaloneNode(cfg, index, snapshot)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported bootstrap config")
 	}
@@ -244,6 +255,7 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 	}
 	lstats := stats.NewLeaderStats(id.String())
 
+	shub := newSendHub(cfg.Transport, cfg.Cluster, sstats, lstats)
 	s := &EtcdServer{
 		store:      st,
 		node:       n,
@@ -256,7 +268,7 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		}{w, ss},
 		stats:      sstats,
 		lstats:     lstats,
-		send:       Sender(cfg.Transport, cfg.Cluster, sstats, lstats),
+		sender:     shub,
 		Ticker:     time.Tick(100 * time.Millisecond),
 		SyncTicker: time.Tick(500 * time.Millisecond),
 		snapCount:  cfg.SnapCount,
@@ -321,14 +333,13 @@ func (s *EtcdServer) run() {
 			if err := s.storage.SaveSnap(rd.Snapshot); err != nil {
 				log.Fatalf("etcdserver: create snapshot error: %v", err)
 			}
-			s.send(rd.Messages)
+			s.sender.Send(rd.Messages)
 
 			// TODO(bmizerany): do this in the background, but take
 			// care to apply entries in a single goroutine, and not
 			// race them.
-			// TODO: apply configuration change into ClusterStore.
 			if len(rd.CommittedEntries) != 0 {
-				appliedi = s.apply(rd.CommittedEntries, nodes)
+				appliedi = s.apply(rd.CommittedEntries)
 			}
 
 			if rd.Snapshot.Index > snapi {
@@ -364,6 +375,7 @@ func (s *EtcdServer) Stop() {
 	s.node.Stop()
 	close(s.done)
 	<-s.stopped
+	s.sender.Stop()
 }
 
 // Do interprets r and performs an operation on s.store according to r.Method
@@ -472,8 +484,9 @@ func (s *EtcdServer) Term() uint64 {
 	return atomic.LoadUint64(&s.raftTerm)
 }
 
-// configure sends configuration change through consensus then performs it.
-// It will block until the change is performed or there is an error.
+// configure sends a configuration change through consensus and
+// then waits for it to be applied to the server. It
+// will block until the change is performed or there is an error.
 func (s *EtcdServer) configure(ctx context.Context, cc raftpb.ConfChange) error {
 	ch := s.w.Register(cc.ID)
 	if err := s.node.ProposeConfChange(ctx, cc); err != nil {
@@ -559,7 +572,9 @@ func getExpirationTime(r *pb.Request) time.Time {
 	return t
 }
 
-func (s *EtcdServer) apply(es []raftpb.Entry, nodes []uint64) uint64 {
+// apply takes an Entry received from Raft (after it has been committed) and
+// applies it to the current state of the EtcdServer
+func (s *EtcdServer) apply(es []raftpb.Entry) uint64 {
 	var applied uint64
 	for i := range es {
 		e := es[i]
@@ -571,7 +586,7 @@ func (s *EtcdServer) apply(es []raftpb.Entry, nodes []uint64) uint64 {
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
 			pbutil.MustUnmarshal(&cc, e.Data)
-			s.w.Trigger(cc.ID, s.applyConfChange(cc, nodes))
+			s.w.Trigger(cc.ID, s.applyConfChange(cc))
 		default:
 			log.Panicf("entry type should be either EntryNormal or EntryConfChange")
 		}
@@ -605,13 +620,11 @@ func (s *EtcdServer) applyRequest(r pb.Request) Response {
 		default:
 			if storeMemberAttributeRegexp.MatchString(r.Path) {
 				id := mustParseMemberIDFromKey(path.Dir(r.Path))
-				m := s.Cluster.Member(id)
-				if m == nil {
-					log.Panicf("fetch member %s should never fail", id)
-				}
-				if err := json.Unmarshal([]byte(r.Val), &m.Attributes); err != nil {
+				var attr Attributes
+				if err := json.Unmarshal([]byte(r.Val), &attr); err != nil {
 					log.Panicf("unmarshal %s should never fail: %v", r.Val, err)
 				}
+				s.Cluster.UpdateMemberAttributes(id, attr)
 			}
 			return f(s.store.Set(r.Path, r.Dir, r.Val, expr))
 		}
@@ -633,8 +646,10 @@ func (s *EtcdServer) applyRequest(r pb.Request) Response {
 	}
 }
 
-func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, nodes []uint64) error {
-	if err := s.checkConfChange(cc, nodes); err != nil {
+// applyConfChange applies a ConfChange to the server. It is only
+// invoked with a ConfChange that has already passed through Raft
+func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange) error {
+	if err := s.Cluster.ValidateConfigurationChange(cc); err != nil {
 		cc.NodeID = raft.None
 		s.node.ApplyConfChange(cc)
 		return err
@@ -650,30 +665,13 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, nodes []uint64) error
 			log.Panicf("nodeID should always be equal to member ID")
 		}
 		s.Cluster.AddMember(m)
-		log.Printf("etcdserver: added node %s to cluster", types.ID(cc.NodeID))
+		s.sender.Add(m)
+		log.Printf("etcdserver: added node %s %v to cluster %s", types.ID(cc.NodeID), m.PeerURLs, s.Cluster.ID())
 	case raftpb.ConfChangeRemoveNode:
 		id := types.ID(cc.NodeID)
 		s.Cluster.RemoveMember(id)
-		log.Printf("etcdserver: removed node %s from cluster", id)
-	}
-	return nil
-}
-
-func (s *EtcdServer) checkConfChange(cc raftpb.ConfChange, nodes []uint64) error {
-	if s.Cluster.IsIDRemoved(types.ID(cc.NodeID)) {
-		return ErrIDRemoved
-	}
-	switch cc.Type {
-	case raftpb.ConfChangeAddNode:
-		if containsUint64(nodes, cc.NodeID) {
-			return ErrIDExists
-		}
-	case raftpb.ConfChangeRemoveNode:
-		if !containsUint64(nodes, cc.NodeID) {
-			return ErrIDNotFound
-		}
-	default:
-		log.Panicf("ConfChange type should be either AddNode or RemoveNode")
+		s.sender.Remove(id)
+		log.Printf("etcdserver: removed node %s from cluster %s", id, s.Cluster.ID())
 	}
 	return nil
 }
@@ -701,22 +699,22 @@ func GetClusterFromPeers(urls []string) (*Cluster, error) {
 	for _, u := range urls {
 		resp, err := http.Get(u + "/members")
 		if err != nil {
-			log.Printf("etcdserver: get /members on %s: %v", u, err)
+			log.Printf("etcdserver: could not get cluster response from %s: %v", u, err)
 			continue
 		}
 		b, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("etcdserver: read body error: %v", err)
+			log.Printf("etcdserver: could not read the body of cluster response: %v", err)
 			continue
 		}
 		var membs []*Member
 		if err := json.Unmarshal(b, &membs); err != nil {
-			log.Printf("etcdserver: unmarshal body error: %v", err)
+			log.Printf("etcdserver: could not unmarshal cluster response: %v", err)
 			continue
 		}
 		id, err := types.IDFromString(resp.Header.Get("X-Etcd-Cluster-ID"))
 		if err != nil {
-			log.Printf("etcdserver: parse uint error: %v", err)
+			log.Printf("etcdserver: could not parse the cluster ID from cluster res: %v", err)
 			continue
 		}
 		return NewClusterFromMembers("", id, membs), nil
@@ -726,8 +724,6 @@ func GetClusterFromPeers(urls []string) (*Cluster, error) {
 
 func startNode(cfg *ServerConfig, ids []types.ID) (id types.ID, n raft.Node, w *wal.WAL) {
 	var err error
-	// TODO: remove the discoveryURL when it becomes part of the source for
-	// generating nodeID.
 	member := cfg.Cluster.MemberByName(cfg.Name)
 	metadata := pbutil.MustMarshal(
 		&pb.Metadata{
@@ -752,23 +748,42 @@ func startNode(cfg *ServerConfig, ids []types.ID) (id types.ID, n raft.Node, w *
 	return
 }
 
-func restartNode(cfg *ServerConfig, index uint64, snapshot *raftpb.Snapshot) (id types.ID, n raft.Node, w *wal.WAL) {
+// getOtherPeerURLs returns peer urls of other members in the cluster. The
+// returned list is sorted in ascending lexicographical order.
+func getOtherPeerURLs(cl ClusterInfo, self string) []string {
+	us := make([]string, 0)
+	for _, m := range cl.Members() {
+		if m.Name == self {
+			continue
+		}
+		us = append(us, m.PeerURLs...)
+	}
+	sort.Strings(us)
+	return us
+}
+
+func restartNode(cfg *ServerConfig, index uint64, snapshot *raftpb.Snapshot) (types.ID, raft.Node, *wal.WAL) {
+	w, id, cid, st, ents := readWAL(cfg.WALDir(), index)
+	cfg.Cluster.SetID(cid)
+
+	log.Printf("etcdserver: restart member %s in cluster %s at commit index %d", id, cfg.Cluster.ID(), st.Commit)
+	n := raft.RestartNode(uint64(id), 10, 1, snapshot, st, ents)
+	return id, n, w
+}
+
+func readWAL(waldir string, index uint64) (w *wal.WAL, id, cid types.ID, st raftpb.HardState, ents []raftpb.Entry) {
 	var err error
-	// restart a node from previous wal
-	if w, err = wal.OpenAtIndex(cfg.WALDir(), index); err != nil {
+	if w, err = wal.OpenAtIndex(waldir, index); err != nil {
 		log.Fatalf("etcdserver: open wal error: %v", err)
 	}
-	wmetadata, st, ents, err := w.ReadAll()
-	if err != nil {
+	var wmetadata []byte
+	if wmetadata, st, ents, err = w.ReadAll(); err != nil {
 		log.Fatalf("etcdserver: read wal error: %v", err)
 	}
-
 	var metadata pb.Metadata
 	pbutil.MustUnmarshal(&metadata, wmetadata)
 	id = types.ID(metadata.NodeID)
-	cfg.Cluster.SetID(types.ID(metadata.ClusterID))
-	log.Printf("etcdserver: restart member %s in cluster %s at commit index %d", id, cfg.Cluster.ID(), st.Commit)
-	n = raft.RestartNode(uint64(id), 10, 1, snapshot, st, ents)
+	cid = types.ID(metadata.ClusterID)
 	return
 }
 
