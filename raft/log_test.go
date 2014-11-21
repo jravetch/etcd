@@ -326,6 +326,37 @@ func TestCompactionSideEffects(t *testing.T) {
 	}
 }
 
+func TestNextEnts(t *testing.T) {
+	snap := pb.Snapshot{Term: 1, Index: 3}
+	ents := []pb.Entry{
+		{Term: 1, Index: 3},
+		{Term: 1, Index: 4},
+		{Term: 1, Index: 5},
+		{Term: 1, Index: 6},
+	}
+	tests := []struct {
+		applied uint64
+		wents   []pb.Entry
+	}{
+		{0, ents[1:3]},
+		{3, ents[1:3]},
+		{4, ents[2:3]},
+		{5, nil},
+	}
+	for i, tt := range tests {
+		raftLog := newLog()
+		raftLog.restore(snap)
+		raftLog.load(ents)
+		raftLog.maybeCommit(5, 1)
+		raftLog.appliedTo(tt.applied)
+
+		ents := raftLog.nextEnts()
+		if !reflect.DeepEqual(ents, tt.wents) {
+			t.Errorf("#%d: ents = %+v, want %+v", i, ents, tt.wents)
+		}
+	}
+}
+
 func TestUnstableEnts(t *testing.T) {
 	previousEnts := []pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}}
 	tests := []struct {
@@ -335,6 +366,7 @@ func TestUnstableEnts(t *testing.T) {
 	}{
 		{3, nil, 3},
 		{1, previousEnts, 3},
+		{0, append([]pb.Entry{{}}, previousEnts...), 3},
 	}
 
 	for i, tt := range tests {
@@ -342,12 +374,64 @@ func TestUnstableEnts(t *testing.T) {
 		raftLog.append(0, previousEnts...)
 		raftLog.unstable = tt.unstable
 		ents := raftLog.unstableEnts()
-		raftLog.stableTo(raftLog.lastIndex())
+		if l := len(ents); l > 0 {
+			raftLog.stableTo(ents[l-1].Index)
+		}
 		if !reflect.DeepEqual(ents, tt.wents) {
 			t.Errorf("#%d: unstableEnts = %+v, want %+v", i, ents, tt.wents)
 		}
 		if g := raftLog.unstable; g != tt.wunstable {
 			t.Errorf("#%d: unstable = %d, want %d", i, g, tt.wunstable)
+		}
+	}
+}
+
+func TestCommitTo(t *testing.T) {
+	previousEnts := []pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}, {Term: 3, Index: 3}}
+	commit := uint64(2)
+	tests := []struct {
+		commit  uint64
+		wcommit uint64
+		wpanic  bool
+	}{
+		{3, 3, false},
+		{1, 2, false}, // never decrease
+		{4, 0, true},  // commit out of range -> panic
+	}
+	for i, tt := range tests {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if tt.wpanic != true {
+						t.Errorf("%d: panic = %v, want %v", i, true, tt.wpanic)
+					}
+				}
+			}()
+			raftLog := newLog()
+			raftLog.append(0, previousEnts...)
+			raftLog.committed = commit
+			raftLog.commitTo(tt.commit)
+			if raftLog.committed != tt.wcommit {
+				t.Errorf("#%d: committed = %d, want %d", i, raftLog.committed, tt.wcommit)
+			}
+		}()
+	}
+}
+
+func TestStableTo(t *testing.T) {
+	tests := []struct {
+		stable    uint64
+		wunstable uint64
+	}{
+		{0, 1},
+		{1, 2},
+		{2, 3},
+	}
+	for i, tt := range tests {
+		raftLog := newLog()
+		raftLog.stableTo(tt.stable)
+		if raftLog.unstable != tt.wunstable {
+			t.Errorf("#%d: unstable = %d, want %d", i, raftLog.unstable, tt.wunstable)
 		}
 	}
 }
@@ -413,9 +497,6 @@ func TestLogRestore(t *testing.T) {
 	}
 	if raftLog.offset != index {
 		t.Errorf("offset = %d, want %d", raftLog.offset, index)
-	}
-	if raftLog.applied != index {
-		t.Errorf("applied = %d, want %d", raftLog.applied, index)
 	}
 	if raftLog.committed != index {
 		t.Errorf("comitted = %d, want %d", raftLog.committed, index)

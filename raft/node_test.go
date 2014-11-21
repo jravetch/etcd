@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
+	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/coreos/etcd/pkg/testutil"
 	"github.com/coreos/etcd/raft/raftpb"
 )
@@ -107,6 +107,82 @@ func TestNodeStepUnblock(t *testing.T) {
 	}
 }
 
+// TestNodePropose ensures that node.Propose sends the given proposal to the underlying raft.
+func TestNodePropose(t *testing.T) {
+	msgs := []raftpb.Message{}
+	appendStep := func(r *raft, m raftpb.Message) {
+		msgs = append(msgs, m)
+	}
+
+	n := newNode()
+	r := newRaft(1, []uint64{1}, 10, 1)
+	go n.run(r)
+	n.Campaign(context.TODO())
+	for {
+		rd := <-n.Ready()
+		// change the step function to appendStep until this raft becomes leader
+		if rd.SoftState.Lead == r.id {
+			r.step = appendStep
+			n.Advance()
+			break
+		}
+		n.Advance()
+	}
+	n.Propose(context.TODO(), []byte("somedata"))
+	n.Stop()
+
+	if len(msgs) != 1 {
+		t.Fatalf("len(msgs) = %d, want %d", len(msgs), 1)
+	}
+	if msgs[0].Type != raftpb.MsgProp {
+		t.Errorf("msg type = %d, want %d", msgs[0].Type, raftpb.MsgProp)
+	}
+	if !reflect.DeepEqual(msgs[0].Entries[0].Data, []byte("somedata")) {
+		t.Errorf("data = %v, want %v", msgs[0].Entries[0].Data, []byte("somedata"))
+	}
+}
+
+// TestNodeProposeConfig ensures that node.ProposeConfChange sends the given configuration proposal
+// to the underlying raft.
+func TestNodeProposeConfig(t *testing.T) {
+	msgs := []raftpb.Message{}
+	appendStep := func(r *raft, m raftpb.Message) {
+		msgs = append(msgs, m)
+	}
+
+	n := newNode()
+	r := newRaft(1, []uint64{1}, 10, 1)
+	go n.run(r)
+	n.Campaign(context.TODO())
+	for {
+		rd := <-n.Ready()
+		// change the step function to appendStep until this raft becomes leader
+		if rd.SoftState.Lead == r.id {
+			r.step = appendStep
+			n.Advance()
+			break
+		}
+		n.Advance()
+	}
+	cc := raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 1}
+	ccdata, err := cc.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.ProposeConfChange(context.TODO(), cc)
+	n.Stop()
+
+	if len(msgs) != 1 {
+		t.Fatalf("len(msgs) = %d, want %d", len(msgs), 1)
+	}
+	if msgs[0].Type != raftpb.MsgProp {
+		t.Errorf("msg type = %d, want %d", msgs[0].Type, raftpb.MsgProp)
+	}
+	if !reflect.DeepEqual(msgs[0].Entries[0].Data, ccdata) {
+		t.Errorf("data = %v, want %v", msgs[0].Entries[0].Data, ccdata)
+	}
+}
+
 // TestBlockProposal ensures that node will block proposal when it does not
 // know who is the current leader; node will accept proposal when it knows
 // who is the current leader.
@@ -140,6 +216,54 @@ func TestBlockProposal(t *testing.T) {
 	}
 }
 
+// TestNodeTick ensures that node.Tick() will increase the
+// elapsed of the underlying raft state machine.
+func TestNodeTick(t *testing.T) {
+	n := newNode()
+	r := newRaft(1, []uint64{1}, 10, 1)
+	go n.run(r)
+	elapsed := r.elapsed
+	n.Tick()
+	n.Stop()
+	if r.elapsed != elapsed+1 {
+		t.Errorf("elapsed = %d, want %d", r.elapsed, elapsed+1)
+	}
+}
+
+// TestNodeStop ensures that node.Stop() blocks until the node has stopped
+// processing, and that it is idempotent
+func TestNodeStop(t *testing.T) {
+	n := newNode()
+	r := newRaft(1, []uint64{1}, 10, 1)
+	donec := make(chan struct{})
+
+	go func() {
+		n.run(r)
+		close(donec)
+	}()
+
+	elapsed := r.elapsed
+	n.Tick()
+	n.Stop()
+
+	select {
+	case <-donec:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for node to stop!")
+	}
+
+	if r.elapsed != elapsed+1 {
+		t.Errorf("elapsed = %d, want %d", r.elapsed, elapsed+1)
+	}
+	// Further ticks should have no effect, the node is stopped.
+	n.Tick()
+	if r.elapsed != elapsed+1 {
+		t.Errorf("elapsed = %d, want %d", r.elapsed, elapsed+1)
+	}
+	// Subsequent Stops should have no effect.
+	n.Stop()
+}
+
 func TestReadyContainUpdates(t *testing.T) {
 	tests := []struct {
 		rd       Ready
@@ -161,7 +285,10 @@ func TestReadyContainUpdates(t *testing.T) {
 	}
 }
 
-func TestNode(t *testing.T) {
+// TestNodeStart ensures that a node can be started correctly. The node should
+// start with correct configuration change entries, and can accept and commit
+// proposals.
+func TestNodeStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -209,7 +336,7 @@ func TestNode(t *testing.T) {
 	select {
 	case rd := <-n.Ready():
 		t.Errorf("unexpected Ready: %+v", rd)
-	default:
+	case <-time.After(time.Millisecond):
 	}
 }
 
@@ -237,7 +364,40 @@ func TestNodeRestart(t *testing.T) {
 	select {
 	case rd := <-n.Ready():
 		t.Errorf("unexpected Ready: %+v", rd)
-	default:
+	case <-time.After(time.Millisecond):
+	}
+}
+
+func TestNodeRestartFromSnapshot(t *testing.T) {
+	snap := &raftpb.Snapshot{
+		Data:  []byte("some data"),
+		Nodes: []uint64{1, 2},
+		Index: 2,
+		Term:  1,
+	}
+	entries := []raftpb.Entry{
+		{Term: 1, Index: 2},
+		{Term: 1, Index: 3, Data: []byte("foo")},
+	}
+	st := raftpb.HardState{Term: 1, Commit: 3}
+
+	want := Ready{
+		HardState: emptyState,
+		// commit upto index commit index in st
+		CommittedEntries: entries[1:],
+	}
+
+	n := RestartNode(1, 10, 1, snap, st, entries)
+	if g := <-n.Ready(); !reflect.DeepEqual(g, want) {
+		t.Errorf("g = %+v,\n             w   %+v", g, want)
+	} else {
+		n.Advance()
+	}
+
+	select {
+	case rd := <-n.Ready():
+		t.Errorf("unexpected Ready: %+v", rd)
+	case <-time.After(time.Millisecond):
 	}
 }
 
@@ -305,12 +465,12 @@ func TestNodeAdvance(t *testing.T) {
 	select {
 	case rd := <-n.Ready():
 		t.Fatalf("unexpected Ready before Advance: %+v", rd)
-	default:
+	case <-time.After(time.Millisecond):
 	}
 	n.Advance()
 	select {
 	case <-n.Ready():
-	default:
+	case <-time.After(time.Millisecond):
 		t.Errorf("expect Ready after Advance, but there is no Ready available")
 	}
 }

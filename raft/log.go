@@ -67,11 +67,7 @@ func (l *raftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry
 		default:
 			l.append(ci-1, ents[ci-from:]...)
 		}
-		tocommit := min(committed, lastnewi)
-		// if toCommit > commitIndex, set commitIndex = toCommit
-		if l.committed < tocommit {
-			l.committed = tocommit
-		}
+		l.commitTo(min(committed, lastnewi))
 		return lastnewi, true
 	}
 	return 0, false
@@ -115,12 +111,24 @@ func (l *raftLog) unstableEnts() []pb.Entry {
 }
 
 // nextEnts returns all the available entries for execution.
-// all the returned entries will be marked as applied.
+// If applied is smaller than the index of snapshot, it returns all committed
+// entries after the index of snapshot.
 func (l *raftLog) nextEnts() (ents []pb.Entry) {
-	if l.committed > l.applied {
-		return l.slice(l.applied+1, l.committed+1)
+	off := max(l.applied, l.snapshot.Index)
+	if l.committed > off {
+		return l.slice(off+1, l.committed+1)
 	}
 	return nil
+}
+
+func (l *raftLog) commitTo(tocommit uint64) {
+	// never decrease commit
+	if l.committed < tocommit {
+		if l.lastIndex() < tocommit {
+			panic("committed out of range")
+		}
+		l.committed = tocommit
+	}
 }
 
 func (l *raftLog) appliedTo(i uint64) {
@@ -134,9 +142,6 @@ func (l *raftLog) appliedTo(i uint64) {
 }
 
 func (l *raftLog) stableTo(i uint64) {
-	if i == 0 {
-		return
-	}
 	l.unstable = i + 1
 }
 
@@ -180,7 +185,7 @@ func (l *raftLog) matchTerm(i, term uint64) bool {
 
 func (l *raftLog) maybeCommit(maxIndex, term uint64) bool {
 	if maxIndex > l.committed && l.term(maxIndex) == term {
-		l.committed = maxIndex
+		l.commitTo(maxIndex)
 		return true
 	}
 	return false
@@ -214,7 +219,6 @@ func (l *raftLog) restore(s pb.Snapshot) {
 	l.ents = []pb.Entry{{Term: s.Term}}
 	l.unstable = s.Index + 1
 	l.committed = s.Index
-	l.applied = s.Index
 	l.offset = s.Index
 	l.snapshot = s
 }

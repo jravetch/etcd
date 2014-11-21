@@ -59,16 +59,34 @@ type progress struct {
 }
 
 func (pr *progress) update(n uint64) {
-	pr.match = n
+	if pr.match < n {
+		pr.match = n
+	}
+	if pr.next < n+1 {
+		pr.next = n + 1
+	}
+}
+
+func (pr *progress) optimisticUpdate(n uint64) {
 	pr.next = n + 1
 }
 
 // maybeDecrTo returns false if the given to index comes from an out of order message.
 // Otherwise it decreases the progress next index and returns true.
 func (pr *progress) maybeDecrTo(to uint64) bool {
-	// the rejection must be stale if the progress has matched with
-	// follower or "to" does not match next - 1
-	if pr.match != 0 || pr.next-1 != to {
+	if pr.match != 0 {
+		// the rejection must be stale if the progress has matched and "to"
+		// is smaller than "match".
+		if to <= pr.match {
+			return false
+		}
+		// directly decrease next to match + 1
+		pr.next = pr.match + 1
+		return true
+	}
+
+	// the rejection must be stale if "to" does not match next - 1
+	if pr.next-1 != to {
 		return false
 	}
 
@@ -196,15 +214,28 @@ func (r *raft) sendAppend(to uint64) {
 		m.LogTerm = r.raftLog.term(pr.next - 1)
 		m.Entries = r.raftLog.entries(pr.next)
 		m.Commit = r.raftLog.committed
+		// optimistically increase the next if the follower
+		// has been matched.
+		if n := len(m.Entries); pr.match != 0 && n != 0 {
+			pr.optimisticUpdate(m.Entries[n-1].Index)
+		}
 	}
 	r.send(m)
 }
 
 // sendHeartbeat sends an empty MsgApp
 func (r *raft) sendHeartbeat(to uint64) {
+	// Attach the commit as min(to.matched, r.committed).
+	// When the leader sends out heartbeat message,
+	// the receiver(follower) might not be matched with the leader
+	// or it might not have all the committed entries.
+	// The leader MUST NOT forward the follower's commit to
+	// an unmatched index.
+	commit := min(r.prs[to].match, r.raftLog.committed)
 	m := pb.Message{
-		To:   to,
-		Type: pb.MsgApp,
+		To:     to,
+		Type:   pb.MsgApp,
+		Commit: commit,
 	}
 	r.send(m)
 }
@@ -379,6 +410,10 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 	}
 }
 
+func (r *raft) handleHeartbeat(m pb.Message) {
+	r.raftLog.commitTo(m.Commit)
+}
+
 func (r *raft) handleSnapshot(m pb.Message) {
 	if r.restore(m.Snapshot) {
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.lastIndex()})
@@ -474,7 +509,11 @@ func stepFollower(r *raft, m pb.Message) {
 	case pb.MsgApp:
 		r.elapsed = 0
 		r.lead = m.From
-		r.handleAppendEntries(m)
+		if m.LogTerm == 0 && m.Index == 0 && len(m.Entries) == 0 {
+			r.handleHeartbeat(m)
+		} else {
+			r.handleAppendEntries(m)
+		}
 	case pb.MsgSnap:
 		r.elapsed = 0
 		r.handleSnapshot(m)
@@ -531,6 +570,7 @@ func (r *raft) nodes() []uint64 {
 	for k := range r.prs {
 		nodes = append(nodes, k)
 	}
+	sort.Sort(uint64Slice(nodes))
 	return nodes
 }
 

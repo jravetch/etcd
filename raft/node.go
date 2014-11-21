@@ -21,7 +21,7 @@ import (
 	"log"
 	"reflect"
 
-	"github.com/coreos/etcd/Godeps/_workspace/src/code.google.com/p/go.net/context"
+	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	pb "github.com/coreos/etcd/raft/raftpb"
 )
 
@@ -143,7 +143,7 @@ type Peer struct {
 
 // StartNode returns a new Node given a unique raft id, a list of raft peers, and
 // the election and heartbeat timeouts in units of ticks.
-// It also builds ConfChangeAddNode entry for each peer and puts them at the head of the log.
+// It appends a ConfChangeAddNode entry for each given peer to the initial log.
 func StartNode(id uint64, peers []Peer, election, heartbeat int) Node {
 	n := newNode()
 	r := newRaft(id, nil, election, heartbeat)
@@ -171,6 +171,7 @@ func RestartNode(id uint64, election, heartbeat int, snapshot *pb.Snapshot, st p
 	r := newRaft(id, nil, election, heartbeat)
 	if snapshot != nil {
 		r.restore(*snapshot)
+		r.raftLog.appliedTo(snapshot.Index)
 	}
 	if !isHardStateEqual(st, emptyState) {
 		r.loadState(st)
@@ -192,6 +193,7 @@ type node struct {
 	advancec chan struct{}
 	tickc    chan struct{}
 	done     chan struct{}
+	stop     chan struct{}
 }
 
 func newNode() node {
@@ -204,11 +206,20 @@ func newNode() node {
 		advancec: make(chan struct{}),
 		tickc:    make(chan struct{}),
 		done:     make(chan struct{}),
+		stop:     make(chan struct{}),
 	}
 }
 
 func (n *node) Stop() {
-	close(n.done)
+	select {
+	case n.stop <- struct{}{}:
+		// Not already stopped, so trigger it
+	case <-n.done:
+		// Node has already been stopped - no need to do anything
+		return
+	}
+	// Block until the stop has been acknowledged by run()
+	<-n.done
 }
 
 func (n *node) run(r *raft) {
@@ -216,6 +227,7 @@ func (n *node) run(r *raft) {
 	var readyc chan Ready
 	var advancec chan struct{}
 	var prevLastUnstablei uint64
+	var havePrevLastUnstablei bool
 	var rd Ready
 
 	lead := None
@@ -271,6 +283,8 @@ func (n *node) run(r *raft) {
 				r.addNode(cc.NodeID)
 			case pb.ConfChangeRemoveNode:
 				r.removeNode(cc.NodeID)
+			case pb.ConfChangeUpdateNode:
+				r.resetPendingConf()
 			default:
 				panic("unexpected conf type")
 			}
@@ -282,6 +296,7 @@ func (n *node) run(r *raft) {
 			}
 			if len(rd.Entries) > 0 {
 				prevLastUnstablei = rd.Entries[len(rd.Entries)-1].Index
+				havePrevLastUnstablei = true
 			}
 			if !IsEmptyHardState(rd.HardState) {
 				prevHardSt = rd.HardState
@@ -290,6 +305,7 @@ func (n *node) run(r *raft) {
 				prevSnapi = rd.Snapshot.Index
 				if prevSnapi > prevLastUnstablei {
 					prevLastUnstablei = prevSnapi
+					havePrevLastUnstablei = true
 				}
 			}
 			r.msgs = nil
@@ -298,11 +314,13 @@ func (n *node) run(r *raft) {
 			if prevHardSt.Commit != 0 {
 				r.raftLog.appliedTo(prevHardSt.Commit)
 			}
-			if prevLastUnstablei != 0 {
+			if havePrevLastUnstablei {
 				r.raftLog.stableTo(prevLastUnstablei)
+				havePrevLastUnstablei = false
 			}
 			advancec = nil
-		case <-n.done:
+		case <-n.stop:
+			close(n.done)
 			return
 		}
 	}
