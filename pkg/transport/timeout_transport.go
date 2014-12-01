@@ -14,32 +14,29 @@
    limitations under the License.
 */
 
-package raft
+package transport
 
 import (
-	"testing"
-
-	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
+	"net"
+	"net/http"
+	"time"
 )
 
-func BenchmarkOneNode(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	n := newNode()
-	r := newRaft(1, []uint64{1}, 10, 1, nil)
-	go n.run(r)
-
-	defer n.Stop()
-
-	n.Campaign(ctx)
-	for i := 0; i < b.N; i++ {
-		<-n.Ready()
-		n.Advance()
-		n.Propose(ctx, []byte("foo"))
+// NewTimeoutTransport returns a transport created using the given TLS info.
+// If read/write on the created connection blocks longer than its time limit,
+// it will return timeout error.
+func NewTimeoutTransport(info TLSInfo, rdtimeoutd, wtimeoutd time.Duration) (*http.Transport, error) {
+	tr, err := NewTransport(info)
+	if err != nil {
+		return nil, err
 	}
-	rd := <-n.Ready()
-	if rd.HardState.Commit != uint64(b.N+1) {
-		b.Errorf("commit = %d, want %d", rd.HardState.Commit, b.N+1)
-	}
+	tr.Dial = (&rwTimeoutDialer{
+		Dialer: net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		},
+		rdtimeoutd: rdtimeoutd,
+		wtimeoutd:  wtimeoutd,
+	}).Dial
+	return tr, nil
 }

@@ -14,32 +14,22 @@
    limitations under the License.
 */
 
-package raft
+package ioutils
 
 import (
+	"bytes"
 	"testing"
-
-	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 )
 
-func BenchmarkOneNode(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	n := newNode()
-	r := newRaft(1, []uint64{1}, 10, 1, nil)
-	go n.run(r)
-
-	defer n.Stop()
-
-	n.Campaign(ctx)
-	for i := 0; i < b.N; i++ {
-		<-n.Ready()
-		n.Advance()
-		n.Propose(ctx, []byte("foo"))
+func TestLimitedBufferReaderRead(t *testing.T) {
+	buf := bytes.NewBuffer(make([]byte, 10))
+	ln := 1
+	lr := NewLimitedBufferReader(buf, ln)
+	n, err := lr.Read(make([]byte, 10))
+	if err != nil {
+		t.Fatalf("unexpected read error: %v", err)
 	}
-	rd := <-n.Ready()
-	if rd.HardState.Commit != uint64(b.N+1) {
-		b.Errorf("commit = %d, want %d", rd.HardState.Commit, b.N+1)
+	if n != ln {
+		t.Errorf("len(data read) = %d, want %d", n, ln)
 	}
 }

@@ -14,32 +14,28 @@
    limitations under the License.
 */
 
-package raft
+package ioutils
 
-import (
-	"testing"
+import "io"
 
-	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
-)
-
-func BenchmarkOneNode(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	n := newNode()
-	r := newRaft(1, []uint64{1}, 10, 1, nil)
-	go n.run(r)
-
-	defer n.Stop()
-
-	n.Campaign(ctx)
-	for i := 0; i < b.N; i++ {
-		<-n.Ready()
-		n.Advance()
-		n.Propose(ctx, []byte("foo"))
+// NewLimitedBufferReader returns a reader that reads from the given reader
+// but limits the amount of data returned to at most n bytes.
+func NewLimitedBufferReader(r io.Reader, n int) io.Reader {
+	return &limitedBufferReader{
+		r: r,
+		n: n,
 	}
-	rd := <-n.Ready()
-	if rd.HardState.Commit != uint64(b.N+1) {
-		b.Errorf("commit = %d, want %d", rd.HardState.Commit, b.N+1)
+}
+
+type limitedBufferReader struct {
+	r io.Reader
+	n int
+}
+
+func (r *limitedBufferReader) Read(p []byte) (n int, err error) {
+	np := p
+	if len(np) > r.n {
+		np = np[:r.n]
 	}
+	return r.r.Read(np)
 }

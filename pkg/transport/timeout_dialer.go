@@ -14,32 +14,25 @@
    limitations under the License.
 */
 
-package raft
+package transport
 
 import (
-	"testing"
-
-	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
+	"net"
+	"time"
 )
 
-func BenchmarkOneNode(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+type rwTimeoutDialer struct {
+	wtimeoutd  time.Duration
+	rdtimeoutd time.Duration
+	net.Dialer
+}
 
-	n := newNode()
-	r := newRaft(1, []uint64{1}, 10, 1, nil)
-	go n.run(r)
-
-	defer n.Stop()
-
-	n.Campaign(ctx)
-	for i := 0; i < b.N; i++ {
-		<-n.Ready()
-		n.Advance()
-		n.Propose(ctx, []byte("foo"))
+func (d *rwTimeoutDialer) Dial(network, address string) (net.Conn, error) {
+	conn, err := d.Dialer.Dial(network, address)
+	tconn := &timeoutConn{
+		rdtimeoutd: d.rdtimeoutd,
+		wtimeoutd:  d.wtimeoutd,
+		Conn:       conn,
 	}
-	rd := <-n.Ready()
-	if rd.HardState.Commit != uint64(b.N+1) {
-		b.Errorf("commit = %d, want %d", rd.HardState.Commit, b.N+1)
-	}
+	return tconn, err
 }
