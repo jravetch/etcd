@@ -31,7 +31,7 @@ import (
 func nextEnts(r *raft, s *MemoryStorage) (ents []pb.Entry) {
 	// Transfer all unstable entries to "stable" storage.
 	s.Append(r.raftLog.unstableEntries())
-	r.raftLog.stableTo(r.raftLog.lastIndex())
+	r.raftLog.stableTo(r.raftLog.lastIndex(), r.raftLog.lastTerm())
 
 	ents = r.raftLog.nextEnts()
 	r.raftLog.appliedTo(r.raftLog.committed)
@@ -662,16 +662,16 @@ func TestHandleMsgApp(t *testing.T) {
 
 		// Ensure 2
 		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 1, Index: 1, Commit: 1}, 2, 1, false},
-		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 0, Index: 0, Commit: 1, Entries: []pb.Entry{{Term: 2}}}, 1, 1, false},
-		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 3, Entries: []pb.Entry{{Term: 2}, {Term: 2}}}, 4, 3, false},
-		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 4, Entries: []pb.Entry{{Term: 2}}}, 3, 3, false},
-		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 1, Index: 1, Commit: 4, Entries: []pb.Entry{{Term: 2}}}, 2, 2, false},
+		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 0, Index: 0, Commit: 1, Entries: []pb.Entry{{Index: 1, Term: 2}}}, 1, 1, false},
+		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 3, Entries: []pb.Entry{{Index: 3, Term: 2}, {Index: 4, Term: 2}}}, 4, 3, false},
+		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 4, Entries: []pb.Entry{{Index: 3, Term: 2}}}, 3, 3, false},
+		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 1, Index: 1, Commit: 4, Entries: []pb.Entry{{Index: 2, Term: 2}}}, 2, 2, false},
 
 		// Ensure 3
-		{pb.Message{Type: pb.MsgApp, Term: 1, LogTerm: 1, Index: 1, Commit: 3}, 2, 1, false},                                 // match entry 1, commit upto last new entry 1
-		{pb.Message{Type: pb.MsgApp, Term: 1, LogTerm: 1, Index: 1, Commit: 3, Entries: []pb.Entry{{Term: 2}}}, 2, 2, false}, // match entry 1, commit upto last new entry 2
-		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 3}, 2, 2, false},                                 // match entry 2, commit upto last new entry 2
-		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 4}, 2, 2, false},                                 // commit upto log.last()
+		{pb.Message{Type: pb.MsgApp, Term: 1, LogTerm: 1, Index: 1, Commit: 3}, 2, 1, false},                                           // match entry 1, commit up to last new entry 1
+		{pb.Message{Type: pb.MsgApp, Term: 1, LogTerm: 1, Index: 1, Commit: 3, Entries: []pb.Entry{{Index: 2, Term: 2}}}, 2, 2, false}, // match entry 1, commit up to last new entry 2
+		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 3}, 2, 2, false},                                           // match entry 2, commit up to last new entry 2
+		{pb.Message{Type: pb.MsgApp, Term: 2, LogTerm: 2, Index: 2, Commit: 4}, 2, 2, false},                                           // commit up to log.last()
 	}
 
 	for i, tt := range tests {
@@ -918,7 +918,7 @@ func TestLeaderAppResp(t *testing.T) {
 		wcommitted uint64
 	}{
 		{3, true, 0, 3, 0, 0, 0},  // stale resp; no replies
-		{2, true, 0, 2, 1, 1, 0},  // denied resp; leader does not commit; decrese next and send probing msg
+		{2, true, 0, 2, 1, 1, 0},  // denied resp; leader does not commit; decrease next and send probing msg
 		{2, false, 2, 4, 2, 2, 2}, // accept resp; leader commits; broadcast with commit index
 		{0, false, 0, 3, 0, 0, 0}, // ignore heartbeat replies
 	}
@@ -997,8 +997,8 @@ func TestBcastBeat(t *testing.T) {
 		3: min(sm.raftLog.committed, sm.prs[3].match),
 	}
 	for i, m := range msgs {
-		if m.Type != pb.MsgApp {
-			t.Fatalf("#%d: type = %v, want = %v", i, m.Type, pb.MsgApp)
+		if m.Type != pb.MsgHeartbeat {
+			t.Fatalf("#%d: type = %v, want = %v", i, m.Type, pb.MsgHeartbeat)
 		}
 		if m.Index != 0 {
 			t.Fatalf("#%d: prevIndex = %d, want %d", i, m.Index, 0)
@@ -1052,8 +1052,8 @@ func TestRecvMsgBeat(t *testing.T) {
 			t.Errorf("%d: len(msgs) = %d, want %d", i, len(msgs), tt.wMsg)
 		}
 		for _, m := range msgs {
-			if m.Type != pb.MsgApp {
-				t.Errorf("%d: msg.type = %v, want %v", i, m.Type, pb.MsgApp)
+			if m.Type != pb.MsgHeartbeat {
+				t.Errorf("%d: msg.type = %v, want %v", i, m.Type, pb.MsgHeartbeat)
 			}
 		}
 	}
@@ -1077,7 +1077,7 @@ func TestLeaderIncreaseNext(t *testing.T) {
 
 	for i, tt := range tests {
 		sm := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage())
-		sm.raftLog.append(0, previousEnts...)
+		sm.raftLog.append(previousEnts...)
 		sm.becomeCandidate()
 		sm.becomeLeader()
 		sm.prs[2].match, sm.prs[2].next = tt.match, tt.next
@@ -1118,6 +1118,40 @@ func TestRestore(t *testing.T) {
 
 	if ok := sm.restore(s); ok {
 		t.Fatal("restore succeed, want fail")
+	}
+}
+
+func TestRestoreIgnoreSnapshot(t *testing.T) {
+	previousEnts := []pb.Entry{{Term: 1, Index: 1}, {Term: 1, Index: 2}, {Term: 1, Index: 3}}
+	commit := uint64(1)
+	storage := NewMemoryStorage()
+	sm := newRaft(1, []uint64{1, 2}, 10, 1, storage)
+	sm.raftLog.append(previousEnts...)
+	sm.raftLog.commitTo(commit)
+
+	s := pb.Snapshot{
+		Metadata: pb.SnapshotMetadata{
+			Index:     commit,
+			Term:      1,
+			ConfState: pb.ConfState{Nodes: []uint64{1, 2}},
+		},
+	}
+
+	// ignore snapshot
+	if ok := sm.restore(s); ok {
+		t.Errorf("restore = %t, want %t", ok, false)
+	}
+	if sm.raftLog.committed != commit {
+		t.Errorf("commit = %d, want %d", sm.raftLog.committed, commit)
+	}
+
+	// ignore snapshot and fast forward commit
+	s.Metadata.Index = commit + 1
+	if ok := sm.restore(s); ok {
+		t.Errorf("restore = %t, want %t", ok, false)
+	}
+	if sm.raftLog.committed != commit+1 {
+		t.Errorf("commit = %d, want %d", sm.raftLog.committed, commit+1)
 	}
 }
 
@@ -1189,7 +1223,7 @@ func TestSlowNodeRestore(t *testing.T) {
 	// trigger a commit
 	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{}}})
 	if follower.raftLog.committed != lead.raftLog.committed {
-		t.Errorf("follower.comitted = %d, want %d", follower.raftLog.committed, lead.raftLog.committed)
+		t.Errorf("follower.committed = %d, want %d", follower.raftLog.committed, lead.raftLog.committed)
 	}
 }
 
@@ -1345,7 +1379,7 @@ func TestRaftNodes(t *testing.T) {
 func ents(terms ...uint64) *raft {
 	ents := []pb.Entry{{}}
 	for i, term := range terms {
-		ents = append(ents, pb.Entry{Index: uint64(i), Term: term})
+		ents = append(ents, pb.Entry{Index: uint64(i + 1), Term: term})
 	}
 
 	sm := &raft{

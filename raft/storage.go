@@ -28,6 +28,8 @@ import (
 // index is unavailable because it predates the last snapshot.
 var ErrCompacted = errors.New("requested index is unavailable due to compaction")
 
+var ErrUnavailable = errors.New("requested entry at index is unavailable")
+
 // Storage is an interface that may be implemented by the application
 // to retrieve log entries from storage.
 //
@@ -47,8 +49,9 @@ type Storage interface {
 	// LastIndex returns the index of the last entry in the log.
 	LastIndex() (uint64, error)
 	// FirstIndex returns the index of the first log entry that is
-	// available via Entries (older entries have been incorporated
-	// into the latest Snapshot).
+	// possibly available via Entries (older entries have been incorporated
+	// into the latest Snapshot; if storage only contains the dummy entry the
+	// first log entry is not available).
 	FirstIndex() (uint64, error)
 	// Snapshot returns the most recent snapshot.
 	Snapshot() (pb.Snapshot, error)
@@ -94,6 +97,10 @@ func (ms *MemoryStorage) Entries(lo, hi uint64) ([]pb.Entry, error) {
 	offset := ms.snapshot.Metadata.Index
 	if lo <= offset {
 		return nil, ErrCompacted
+	}
+	// only contains dummy entries.
+	if len(ms.ents) == 1 {
+		return nil, ErrUnavailable
 	}
 	return ms.ents[lo-offset : hi-offset], nil
 }
@@ -179,13 +186,27 @@ func (ms *MemoryStorage) Append(entries []pb.Entry) {
 	if len(entries) == 0 {
 		return
 	}
-	offset := entries[0].Index - ms.snapshot.Metadata.Index
-	// do not append out of date entries
-	if offset < 0 {
+	first := ms.snapshot.Metadata.Index + 1
+	last := entries[0].Index + uint64(len(entries)) - 1
+
+	// shortcut if there is no new entry.
+	if last < first {
 		return
 	}
-	if uint64(len(ms.ents)) >= offset {
-		ms.ents = ms.ents[:offset]
+	// truncate old entries
+	if first > entries[0].Index {
+		entries = entries[first-entries[0].Index:]
 	}
-	ms.ents = append(ms.ents, entries...)
+
+	offset := entries[0].Index - ms.snapshot.Metadata.Index
+	switch {
+	case uint64(len(ms.ents)) > offset:
+		ms.ents = append([]pb.Entry{}, ms.ents[:offset]...)
+		ms.ents = append(ms.ents, entries...)
+	case uint64(len(ms.ents)) == offset:
+		ms.ents = append(ms.ents, entries...)
+	default:
+		log.Panicf("missing log entry [last: %d, append at: %d]",
+			ms.snapshot.Metadata.Index+uint64(len(ms.ents)), entries[0].Index)
+	}
 }

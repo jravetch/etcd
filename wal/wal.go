@@ -26,6 +26,7 @@ import (
 	"reflect"
 	"sort"
 
+	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/coreos/etcd/pkg/pbutil"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
@@ -45,7 +46,6 @@ const (
 var (
 	ErrMetadataConflict = errors.New("wal: conflicting metadata found")
 	ErrFileNotFound     = errors.New("wal: file not found")
-	ErrIndexNotFound    = errors.New("wal: index not found in file")
 	ErrCRCMismatch      = errors.New("wal: crc mismatch")
 	crcTable            = crc32.MakeTable(crc32.Castagnoli)
 )
@@ -56,8 +56,9 @@ var (
 // A just opened WAL is in read mode, and ready for reading records.
 // The WAL will be ready for appending after reading out all the previous records.
 type WAL struct {
-	dir      string // the living directory of the underlay files
-	metadata []byte // metadata recorded at the head of each WAL
+	dir      string           // the living directory of the underlay files
+	metadata []byte           // metadata recorded at the head of each WAL
+	state    raftpb.HardState // hardstate recorded at the head of WAL
 
 	ri      uint64   // index of entry to start reading
 	decoder *decoder // decoder to decode records
@@ -110,7 +111,7 @@ func Create(dirpath string, metadata []byte) (*WAL, error) {
 // index. The WAL cannot be appended to before reading out all of its
 // previous records.
 func OpenAtIndex(dirpath string, index uint64) (*WAL, error) {
-	names, err := readDir(dirpath)
+	names, err := fileutil.ReadDir(dirpath)
 	if err != nil {
 		return nil, err
 	}
@@ -203,10 +204,6 @@ func (w *WAL) ReadAll() (metadata []byte, state raftpb.HardState, ents []raftpb.
 		state.Reset()
 		return nil, state, nil, err
 	}
-	if w.enti < w.ri {
-		state.Reset()
-		return nil, state, nil, ErrIndexNotFound
-	}
 
 	// close decoder, disable reading
 	w.decoder.close()
@@ -240,7 +237,13 @@ func (w *WAL) Cut() error {
 	if err := w.saveCrc(prevCrc); err != nil {
 		return err
 	}
-	return w.encoder.encode(&walpb.Record{Type: metadataType, Data: w.metadata})
+	if err := w.encoder.encode(&walpb.Record{Type: metadataType, Data: w.metadata}); err != nil {
+		return err
+	}
+	if err := w.SaveState(&w.state); err != nil {
+		return err
+	}
+	return w.sync()
 }
 
 func (w *WAL) sync() error {
@@ -278,6 +281,7 @@ func (w *WAL) SaveState(s *raftpb.HardState) error {
 	if raft.IsEmptyHardState(*s) {
 		return nil
 	}
+	w.state = *s
 	b := pbutil.MustMarshal(s)
 	rec := &walpb.Record{Type: stateType, Data: b}
 	return w.encoder.encode(rec)
