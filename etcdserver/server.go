@@ -90,21 +90,6 @@ type Response struct {
 	err     error
 }
 
-type Storage interface {
-	// Save function saves ents and state to the underlying stable storage.
-	// Save MUST block until st and ents are on stable storage.
-	Save(st raftpb.HardState, ents []raftpb.Entry) error
-	// SaveSnap function saves snapshot to the underlying stable storage.
-	SaveSnap(snap raftpb.Snapshot) error
-
-	// TODO: WAL should be able to control cut itself. After implement self-controlled cut,
-	// remove it in this interface.
-	// Cut cuts out a new wal file for saving new state and entries.
-	Cut() error
-	// Close closes the Storage and performs finalization.
-	Close() error
-}
-
 type Server interface {
 	// Start performs any initialization of the Server necessary for it to
 	// begin serving requests. It must be called before Do or Process.
@@ -133,16 +118,6 @@ type Server interface {
 	// UpdateMember attempts to update a existing member in the cluster. It will
 	// return ErrIDNotFound if the member ID does not exist.
 	UpdateMember(ctx context.Context, updateMemb Member) error
-}
-
-type Stats interface {
-	// SelfStats returns the struct representing statistics of this server
-	SelfStats() []byte
-	// LeaderStats returns the statistics of all followers in the cluster
-	// if this server is leader. Otherwise, nil is returned.
-	LeaderStats() []byte
-	// StoreStats returns statistics of the store backing this EtcdServer
-	StoreStats() []byte
 }
 
 type RaftTimer interface {
@@ -210,7 +185,10 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 	var n raft.Node
 	var s *raft.MemoryStorage
 	var id types.ID
-	walVersion := wal.DetectVersion(cfg.DataDir)
+	walVersion, err := wal.DetectVersion(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
 	if walVersion == wal.WALUnknown {
 		return nil, fmt.Errorf("unknown wal version in data dir %s", cfg.DataDir)
 	}
@@ -223,11 +201,7 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		}
 	}
 
-	if err := os.MkdirAll(cfg.SnapDir(), privateDirMode); err != nil {
-		return nil, fmt.Errorf("cannot create snapshot directory: %v", err)
-	}
 	ss := snap.New(cfg.SnapDir())
-
 	switch {
 	case !haveWAL && !cfg.NewCluster:
 		us := getOtherPeerURLs(cfg.Cluster, cfg.Name)
@@ -264,7 +238,7 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		id, n, s, w = startNode(cfg, cfg.Cluster.MemberIDs())
 	case haveWAL:
 		if cfg.ShouldDiscover() {
-			log.Printf("etcdserver: warn: ignoring discovery: etcd has already been initialized and has a valid log in %q", cfg.WALDir())
+			log.Printf("etcdserver: discovery token ignored since a cluster has already been initialized. Valid log found at %q", cfg.WALDir())
 		}
 		var index uint64
 		snapshot, err := ss.Load()
@@ -306,15 +280,12 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		id:          id,
 		attributes:  Attributes{Name: cfg.Name, ClientURLs: cfg.ClientURLs.StringSlice()},
 		Cluster:     cfg.Cluster,
-		storage: struct {
-			*wal.WAL
-			*snap.Snapshotter
-		}{w, ss},
-		stats:      sstats,
-		lstats:     lstats,
-		Ticker:     time.Tick(100 * time.Millisecond),
-		SyncTicker: time.Tick(500 * time.Millisecond),
-		snapCount:  cfg.SnapCount,
+		storage:     NewStorage(w, ss),
+		stats:       sstats,
+		lstats:      lstats,
+		Ticker:      time.Tick(100 * time.Millisecond),
+		SyncTicker:  time.Tick(500 * time.Millisecond),
+		snapCount:   cfg.SnapCount,
 	}
 	srv.sendhub = newSendHub(cfg.Transport, cfg.Cluster, srv, sstats, lstats)
 	for _, m := range getOtherMembers(cfg.Cluster, cfg.Name) {
@@ -395,7 +366,7 @@ func (s *EtcdServer) run() {
 	// snapi indicates the index of the last submitted snapshot request
 	snapi := snap.Metadata.Index
 	appliedi := snap.Metadata.Index
-	nodes := snap.Metadata.ConfState.Nodes
+	confState := snap.Metadata.ConfState
 
 	defer func() {
 		s.node.Stop()
@@ -412,7 +383,6 @@ func (s *EtcdServer) run() {
 		case rd := <-s.node.Ready():
 			if rd.SoftState != nil {
 				atomic.StoreUint64(&s.raftLead, rd.SoftState.Lead)
-				nodes = rd.SoftState.Nodes
 				if rd.RaftState == raft.StateLeader {
 					syncC = s.SyncTicker
 				} else {
@@ -459,7 +429,7 @@ func (s *EtcdServer) run() {
 					ents = rd.CommittedEntries[appliedi+1-firsti:]
 				}
 				if len(ents) > 0 {
-					if appliedi, shouldstop = s.apply(ents); shouldstop {
+					if appliedi, shouldstop = s.apply(ents, &confState); shouldstop {
 						return
 					}
 				}
@@ -469,7 +439,7 @@ func (s *EtcdServer) run() {
 
 			if appliedi-snapi > s.snapCount {
 				log.Printf("etcdserver: start to snapshot (applied: %d, lastsnap: %d)", appliedi, snapi)
-				s.snapshot(appliedi, nodes)
+				s.snapshot(appliedi, &confState)
 				snapi = appliedi
 			}
 		case <-syncC:
@@ -701,7 +671,7 @@ func getExpirationTime(r *pb.Request) time.Time {
 // apply takes entries received from Raft (after it has been committed) and
 // applies them to the current state of the EtcdServer.
 // The given entries should not be empty.
-func (s *EtcdServer) apply(es []raftpb.Entry) (uint64, bool) {
+func (s *EtcdServer) apply(es []raftpb.Entry, confState *raftpb.ConfState) (uint64, bool) {
 	var applied uint64
 	for i := range es {
 		e := es[i]
@@ -713,7 +683,7 @@ func (s *EtcdServer) apply(es []raftpb.Entry) (uint64, bool) {
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
 			pbutil.MustUnmarshal(&cc, e.Data)
-			shouldstop, err := s.applyConfChange(cc)
+			shouldstop, err := s.applyConfChange(cc, confState)
 			s.w.Trigger(cc.ID, err)
 			if shouldstop {
 				return applied, true
@@ -779,13 +749,13 @@ func (s *EtcdServer) applyRequest(r pb.Request) Response {
 
 // applyConfChange applies a ConfChange to the server. It is only
 // invoked with a ConfChange that has already passed through Raft
-func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange) (bool, error) {
+func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.ConfState) (bool, error) {
 	if err := s.Cluster.ValidateConfigurationChange(cc); err != nil {
 		cc.NodeID = raft.None
 		s.node.ApplyConfChange(cc)
 		return false, err
 	}
-	s.node.ApplyConfChange(cc)
+	*confState = *s.node.ApplyConfChange(cc)
 	switch cc.Type {
 	case raftpb.ConfChangeAddNode:
 		m := new(Member)
@@ -833,14 +803,14 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange) (bool, error) {
 }
 
 // TODO: non-blocking snapshot
-func (s *EtcdServer) snapshot(snapi uint64, snapnodes []uint64) {
+func (s *EtcdServer) snapshot(snapi uint64, confState *raftpb.ConfState) {
 	d, err := s.store.Save()
 	// TODO: current store will never fail to do a snapshot
 	// what should we do if the store might fail?
 	if err != nil {
 		log.Panicf("etcdserver: store save should never fail: %v", err)
 	}
-	err = s.raftStorage.Compact(snapi, &raftpb.ConfState{Nodes: snapnodes}, d)
+	err = s.raftStorage.Compact(snapi, confState, d)
 	if err != nil {
 		// the snapshot was done asynchronously with the progress of raft.
 		// raft might have already got a newer snapshot and called compact.
@@ -955,6 +925,9 @@ func startNode(cfg *ServerConfig, ids []types.ID) (id types.ID, n raft.Node, s *
 			ClusterID: uint64(cfg.Cluster.ID()),
 		},
 	)
+	if err := os.MkdirAll(cfg.SnapDir(), privateDirMode); err != nil {
+		log.Fatalf("etcdserver create snapshot directory error: %v", err)
+	}
 	if w, err = wal.Create(cfg.WALDir(), metadata); err != nil {
 		log.Fatalf("etcdserver: create wal error: %v", err)
 	}
@@ -1014,7 +987,7 @@ func restartNode(cfg *ServerConfig, index uint64, snapshot *raftpb.Snapshot) (ty
 
 func readWAL(waldir string, index uint64) (w *wal.WAL, id, cid types.ID, st raftpb.HardState, ents []raftpb.Entry) {
 	var err error
-	if w, err = wal.OpenAtIndex(waldir, index); err != nil {
+	if w, err = wal.Open(waldir, index); err != nil {
 		log.Fatalf("etcdserver: open wal error: %v", err)
 	}
 	var wmetadata []byte
