@@ -2,7 +2,7 @@
 
 etcd is configurable through command-line flags and environment variables. Options set on the command line take precedence over those from the environment.
 
-The format of environment variable for flag `-my-flag` is `ENV_MY_FLAG`. It applies to all  flags.
+The format of environment variable for flag `-my-flag` is `ETCD_MY_FLAG`. It applies to all  flags.
 
 To start etcd automatically using custom settings at startup in Linux, using a [systemd][systemd-intro] unit is highly recommended.
 
@@ -73,6 +73,10 @@ To start etcd automatically using custom settings at startup in Linux, using a [
 
 ##### -discovery
 + Discovery URL used to bootstrap the cluster.
++ default: none
+
+##### -discovery-srv
++ DNS srv domain used to bootstrap the cluster.
 + default: none
 
 ##### -discovery-fallback

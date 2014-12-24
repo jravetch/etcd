@@ -59,6 +59,9 @@ var (
 		"v",
 		"vv",
 	}
+
+	ErrConflictBootstrapFlags = fmt.Errorf("multiple discovery or bootstrap flags are set" +
+		"Choose one of \"initial-cluster\", \"discovery\" or \"discovery-srv\"")
 )
 
 type config struct {
@@ -136,14 +139,14 @@ func NewConfig() *config {
 	// clustering
 	fs.Var(flags.NewURLsValue("http://localhost:2380,http://localhost:7001"), "initial-advertise-peer-urls", "List of this member's peer URLs to advertise to the rest of the cluster")
 	fs.Var(flags.NewURLsValue("http://localhost:2379,http://localhost:4001"), "advertise-client-urls", "List of this member's client URLs to advertise to the rest of the cluster")
-	fs.StringVar(&cfg.durl, "discovery", "", "Discovery service used to bootstrap the cluster")
+	fs.StringVar(&cfg.durl, "discovery", "", "Discovery service used to bootstrap the initial cluster")
 	fs.Var(cfg.fallback, "discovery-fallback", fmt.Sprintf("Valid values include %s", strings.Join(cfg.fallback.Values, ", ")))
 	if err := cfg.fallback.Set(fallbackFlagProxy); err != nil {
 		// Should never happen.
 		log.Panicf("unexpected error setting up discovery-fallback flag: %v", err)
 	}
 	fs.StringVar(&cfg.dproxy, "discovery-proxy", "", "HTTP proxy to use for traffic to discovery service")
-	fs.StringVar(&cfg.dnsCluster, "discovery-srv", "", "Bootstrap initial cluster via DNS domain")
+	fs.StringVar(&cfg.dnsCluster, "discovery-srv", "", "DNS domain used to bootstrap initial cluster")
 	fs.StringVar(&cfg.initialCluster, "initial-cluster", "default=http://localhost:2380,default=http://localhost:7001", "Initial cluster configuration for bootstrapping")
 	fs.StringVar(&cfg.initialClusterToken, "initial-cluster-token", "etcd-cluster", "Initial cluster token for the etcd cluster during bootstrap")
 	fs.Var(cfg.clusterState, "initial-cluster-state", "Initial cluster configuration for bootstrapping")
@@ -189,7 +192,7 @@ func NewConfig() *config {
 }
 
 func (cfg *config) Parse(arguments []string) error {
-	perr := cfg.FlagSet.Parse(os.Args[1:])
+	perr := cfg.FlagSet.Parse(arguments)
 	switch perr {
 	case nil:
 	case flag.ErrHelp:
@@ -213,13 +216,13 @@ func (cfg *config) Parse(arguments []string) error {
 		set[f.Name] = true
 	})
 	nSet := 0
-	for _, v := range []bool{set["discovery"], set["inital-cluster"], set["discovery-srv"]} {
+	for _, v := range []bool{set["discovery"], set["initial-cluster"], set["discovery-srv"]} {
 		if v {
 			nSet += 1
 		}
 	}
 	if nSet > 1 {
-		return fmt.Errorf("multiple discovery or bootstrap flags are set. Choose one of \"discovery\", \"initial-cluster\", or \"discovery-srv\"")
+		return ErrConflictBootstrapFlags
 	}
 
 	cfg.lpurls, err = flags.URLsFromFlags(cfg.FlagSet, "listen-peer-urls", "peer-bind-addr", cfg.peerTLSInfo)
