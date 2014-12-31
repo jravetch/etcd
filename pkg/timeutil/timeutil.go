@@ -14,32 +14,16 @@
    limitations under the License.
 */
 
-package testutil
+package timeutil
 
-import (
-	"net/url"
-	"runtime"
-	"testing"
+import "time"
 
-	"github.com/coreos/etcd/pkg/types"
-)
-
-// WARNING: This is a hack.
-// Remove this when we are able to block/check the status of the go-routines.
-func ForceGosched() {
-	// possibility enough to sched up to 10 go routines.
-	for i := 0; i < 10000; i++ {
-		runtime.Gosched()
+// UnixNanoToTime returns the local time corresponding to the given Unix time in nanoseconds.
+// If the given Unix time is zero, an uninitialized zero time is returned.
+func UnixNanoToTime(ns int64) time.Time {
+	var t time.Time
+	if ns != 0 {
+		t = time.Unix(0, ns)
 	}
-}
-
-func MustNewURLs(t *testing.T, urls []string) []url.URL {
-	if urls == nil {
-		return nil
-	}
-	u, err := types.NewURLs(urls)
-	if err != nil {
-		t.Fatalf("unexpected new urls error: %v", err)
-	}
-	return u
+	return t
 }

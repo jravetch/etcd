@@ -14,34 +14,37 @@
    limitations under the License.
 */
 
-package etcdmain
+package timeutil
 
 import (
+	"reflect"
 	"testing"
-
-	"github.com/coreos/etcd/pkg/testutil"
+	"time"
 )
 
-func TestGenClusterString(t *testing.T) {
+func TestUnixNanoToTime(t *testing.T) {
 	tests := []struct {
-		token string
-		urls  []string
-		wstr  string
+		ns   int64
+		want time.Time
 	}{
 		{
-			"default", []string{"http://127.0.0.1:4001"},
-			"default=http://127.0.0.1:4001",
+			0,
+			time.Time{},
 		},
 		{
-			"node1", []string{"http://0.0.0.0:2379", "http://1.1.1.1:2379"},
-			"node1=http://0.0.0.0:2379,node1=http://1.1.1.1:2379",
+			60000,
+			time.Unix(0, 60000),
+		},
+		{
+			-60000,
+			time.Unix(0, -60000),
 		},
 	}
+
 	for i, tt := range tests {
-		urls := testutil.MustNewURLs(t, tt.urls)
-		str := genClusterString(tt.token, urls)
-		if str != tt.wstr {
-			t.Errorf("#%d: cluster = %s, want %s", i, str, tt.wstr)
+		got := UnixNanoToTime(tt.ns)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("#%d: time = %v, want %v", i, got, tt.want)
 		}
 	}
 }

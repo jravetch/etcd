@@ -14,34 +14,27 @@
    limitations under the License.
 */
 
-package etcdmain
+package pbutil
 
-import (
-	"testing"
+import "testing"
 
-	"github.com/coreos/etcd/pkg/testutil"
-)
-
-func TestGenClusterString(t *testing.T) {
+func TestGetBool(t *testing.T) {
 	tests := []struct {
-		token string
-		urls  []string
-		wstr  string
+		b    *bool
+		wb   bool
+		wset bool
 	}{
-		{
-			"default", []string{"http://127.0.0.1:4001"},
-			"default=http://127.0.0.1:4001",
-		},
-		{
-			"node1", []string{"http://0.0.0.0:2379", "http://1.1.1.1:2379"},
-			"node1=http://0.0.0.0:2379,node1=http://1.1.1.1:2379",
-		},
+		{nil, false, false},
+		{Boolp(true), true, true},
+		{Boolp(false), false, true},
 	}
 	for i, tt := range tests {
-		urls := testutil.MustNewURLs(t, tt.urls)
-		str := genClusterString(tt.token, urls)
-		if str != tt.wstr {
-			t.Errorf("#%d: cluster = %s, want %s", i, str, tt.wstr)
+		b, set := GetBool(tt.b)
+		if b != tt.wb {
+			t.Errorf("#%d: value = %v, want %v", i, b, tt.wb)
+		}
+		if set != tt.wset {
+			t.Errorf("#%d: set = %v, want %v", i, set, tt.wset)
 		}
 	}
 }

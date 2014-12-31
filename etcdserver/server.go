@@ -18,7 +18,6 @@ package etcdserver
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -31,13 +30,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/coreos/etcd/discovery"
 	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
 	pb "github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"github.com/coreos/etcd/etcdserver/idutil"
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/coreos/etcd/pkg/pbutil"
+	"github.com/coreos/etcd/pkg/timeutil"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/pkg/wait"
 	"github.com/coreos/etcd/raft"
@@ -46,6 +46,8 @@ import (
 	"github.com/coreos/etcd/snap"
 	"github.com/coreos/etcd/store"
 	"github.com/coreos/etcd/wal"
+
+	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 )
 
 const (
@@ -64,15 +66,6 @@ const (
 )
 
 var (
-	ErrUnknownMethod = errors.New("etcdserver: unknown method")
-	ErrStopped       = errors.New("etcdserver: server stopped")
-	ErrIDRemoved     = errors.New("etcdserver: ID removed")
-	ErrIDExists      = errors.New("etcdserver: ID exists")
-	ErrIDNotFound    = errors.New("etcdserver: ID not found")
-	ErrPeerURLexists = errors.New("etcdserver: peerURL exists")
-	ErrCanceled      = errors.New("etcdserver: request cancelled")
-	ErrTimeout       = errors.New("etcdserver: request timed out")
-
 	storeMembersPrefix        = path.Join(StoreAdminPrefix, "members")
 	storeRemovedMembersPrefix = path.Join(StoreAdminPrefix, "removed_members")
 
@@ -144,11 +137,11 @@ type EtcdServer struct {
 	stats  *stats.ServerStats
 	lstats *stats.LeaderStats
 
-	// sender specifies the sender to send msgs to members. sending msgs
-	// MUST NOT block. It is okay to drop messages, since clients should
-	// timeout and reissue their messages.  If send is nil, server will
-	// panic.
-	sendhub SendHub
+	// transport specifies the transport to send and receive msgs to members.
+	// Sending messages MUST NOT block. It is okay to drop messages, since
+	// clients should timeout and reissue their messages.
+	// If transport is nil, server will panic.
+	transport rafthttp.Transporter
 
 	Ticker     <-chan time.Time
 	SyncTicker <-chan time.Time
@@ -160,6 +153,8 @@ type EtcdServer struct {
 	raftTerm  uint64
 
 	raftLead uint64
+
+	reqIDGen *idutil.Generator
 }
 
 // NewServer creates a new EtcdServer from the supplied configuration. The
@@ -270,14 +265,24 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		Ticker:      time.Tick(100 * time.Millisecond),
 		SyncTicker:  time.Tick(500 * time.Millisecond),
 		snapCount:   cfg.SnapCount,
+		reqIDGen:    idutil.NewGenerator(uint8(id), time.Now()),
 	}
-	srv.sendhub = newSendHub(cfg.Transport, cfg.Cluster, srv, sstats, lstats)
+	tr := &rafthttp.Transport{
+		RoundTripper: cfg.Transport,
+		ID:           id,
+		ClusterID:    cfg.Cluster.ID(),
+		Raft:         srv,
+		ServerStats:  sstats,
+		LeaderStats:  lstats,
+	}
+	tr.Start()
 	// add all the remote members into sendhub
 	for _, m := range cfg.Cluster.Members() {
 		if m.Name != cfg.Name {
-			srv.sendhub.Add(m)
+			tr.AddPeer(m.ID, m.PeerURLs)
 		}
 	}
+	srv.transport = tr
 	return srv, nil
 }
 
@@ -327,7 +332,7 @@ func (s *EtcdServer) purgeFile() {
 
 func (s *EtcdServer) ID() types.ID { return s.id }
 
-func (s *EtcdServer) SenderFinder() rafthttp.SenderFinder { return s.sendhub }
+func (s *EtcdServer) RaftHandler() http.Handler { return s.transport.Handler() }
 
 func (s *EtcdServer) Process(ctx context.Context, m raftpb.Message) error {
 	if s.Cluster.IsIDRemoved(types.ID(m.From)) {
@@ -343,7 +348,7 @@ func (s *EtcdServer) Process(ctx context.Context, m raftpb.Message) error {
 func (s *EtcdServer) run() {
 	var syncC <-chan time.Time
 	var shouldstop bool
-	shouldstopC := s.sendhub.ShouldStopNotify()
+	shouldstopC := s.transport.ShouldStopNotify()
 
 	// load initial state from raft storage
 	snap, err := s.raftStorage.Snapshot()
@@ -357,7 +362,7 @@ func (s *EtcdServer) run() {
 
 	defer func() {
 		s.node.Stop()
-		s.sendhub.Stop()
+		s.transport.Stop()
 		if err := s.storage.Close(); err != nil {
 			log.Panicf("etcdserver: close storage error: %v", err)
 		}
@@ -397,7 +402,7 @@ func (s *EtcdServer) run() {
 			}
 			s.raftStorage.Append(rd.Entries)
 
-			s.sendhub.Send(rd.Messages)
+			s.send(rd.Messages)
 
 			// recover from snapshot if it is more updated than current applied
 			if !raft.IsEmptySnap(rd.Snapshot) && rd.Snapshot.Metadata.Index > appliedi {
@@ -465,9 +470,7 @@ func (s *EtcdServer) StopNotify() <-chan struct{} { return s.done }
 // respective operation. Do will block until an action is performed or there is
 // an error.
 func (s *EtcdServer) Do(ctx context.Context, r pb.Request) (Response, error) {
-	if r.ID == 0 {
-		log.Panicf("request ID should never be 0")
-	}
+	r.ID = s.reqIDGen.Next()
 	if r.Method == "GET" && r.Quorum {
 		r.Method = "QGET"
 	}
@@ -534,7 +537,6 @@ func (s *EtcdServer) AddMember(ctx context.Context, memb Member) error {
 		return err
 	}
 	cc := raftpb.ConfChange{
-		ID:      GenID(),
 		Type:    raftpb.ConfChangeAddNode,
 		NodeID:  uint64(memb.ID),
 		Context: b,
@@ -544,7 +546,6 @@ func (s *EtcdServer) AddMember(ctx context.Context, memb Member) error {
 
 func (s *EtcdServer) RemoveMember(ctx context.Context, id uint64) error {
 	cc := raftpb.ConfChange{
-		ID:     GenID(),
 		Type:   raftpb.ConfChangeRemoveNode,
 		NodeID: id,
 	}
@@ -557,7 +558,6 @@ func (s *EtcdServer) UpdateMember(ctx context.Context, memb Member) error {
 		return err
 	}
 	cc := raftpb.ConfChange{
-		ID:      GenID(),
 		Type:    raftpb.ConfChangeUpdateNode,
 		NodeID:  uint64(memb.ID),
 		Context: b,
@@ -579,6 +579,7 @@ func (s *EtcdServer) Lead() uint64 { return atomic.LoadUint64(&s.raftLead) }
 // then waits for it to be applied to the server. It
 // will block until the change is performed or there is an error.
 func (s *EtcdServer) configure(ctx context.Context, cc raftpb.ConfChange) error {
+	cc.ID = s.reqIDGen.Next()
 	ch := s.w.Register(cc.ID)
 	if err := s.node.ProposeConfChange(ctx, cc); err != nil {
 		s.w.Trigger(cc.ID, nil)
@@ -608,7 +609,7 @@ func (s *EtcdServer) sync(timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	req := pb.Request{
 		Method: "SYNC",
-		ID:     GenID(),
+		ID:     s.reqIDGen.Next(),
 		Time:   time.Now().UnixNano(),
 	}
 	data := pbutil.MustMarshal(&req)
@@ -632,7 +633,6 @@ func (s *EtcdServer) publish(retryInterval time.Duration) {
 		return
 	}
 	req := pb.Request{
-		ID:     GenID(),
 		Method: "PUT",
 		Path:   MemberAttributesStorePath(s.id),
 		Val:    string(b),
@@ -655,12 +655,13 @@ func (s *EtcdServer) publish(retryInterval time.Duration) {
 	}
 }
 
-func getExpirationTime(r *pb.Request) time.Time {
-	var t time.Time
-	if r.Expiration != 0 {
-		t = time.Unix(0, r.Expiration)
+func (s *EtcdServer) send(ms []raftpb.Message) {
+	for _, m := range ms {
+		if !s.Cluster.IsIDRemoved(types.ID(m.To)) {
+			m.To = 0
+		}
 	}
-	return t
+	s.transport.Send(ms)
 }
 
 // apply takes entries received from Raft (after it has been committed) and
@@ -699,12 +700,12 @@ func (s *EtcdServer) applyRequest(r pb.Request) Response {
 	f := func(ev *store.Event, err error) Response {
 		return Response{Event: ev, err: err}
 	}
-	expr := getExpirationTime(&r)
+	expr := timeutil.UnixNanoToTime(r.Expiration)
 	switch r.Method {
 	case "POST":
 		return f(s.store.Create(r.Path, r.Dir, r.Val, true, expr))
 	case "PUT":
-		exists, existsSet := getBool(r.PrevExist)
+		exists, existsSet := pbutil.GetBool(r.PrevExist)
 		switch {
 		case existsSet:
 			if exists {
@@ -764,7 +765,7 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 		if m.ID == s.id {
 			log.Printf("etcdserver: added local member %s %v to cluster %s", m.ID, m.PeerURLs, s.Cluster.ID())
 		} else {
-			s.sendhub.Add(m)
+			s.transport.AddPeer(m.ID, m.PeerURLs)
 			log.Printf("etcdserver: added member %s %v to cluster %s", m.ID, m.PeerURLs, s.Cluster.ID())
 		}
 	case raftpb.ConfChangeRemoveNode:
@@ -775,7 +776,7 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 			log.Println("etcdserver: the data-dir used by this member must be removed so that this host can be re-added with a new member ID")
 			return true, nil
 		} else {
-			s.sendhub.Remove(id)
+			s.transport.RemovePeer(id)
 			log.Printf("etcdserver: removed member %s from cluster %s", id, s.Cluster.ID())
 		}
 	case raftpb.ConfChangeUpdateNode:
@@ -790,7 +791,7 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 		if m.ID == s.id {
 			log.Printf("etcdserver: update local member %s %v in cluster %s", m.ID, m.PeerURLs, s.Cluster.ID())
 		} else {
-			s.sendhub.Update(m)
+			s.transport.UpdatePeer(m.ID, m.PeerURLs)
 			log.Printf("etcdserver: update member %s %v in cluster %s", m.ID, m.PeerURLs, s.Cluster.ID())
 		}
 	}
@@ -831,13 +832,13 @@ func (s *EtcdServer) snapshot(snapi uint64, confState *raftpb.ConfState) {
 
 // for testing
 func (s *EtcdServer) PauseSending() {
-	hub := s.sendhub.(*sendHub)
-	hub.pause()
+	hub := s.transport.(*rafthttp.Transport)
+	hub.Pause()
 }
 
 func (s *EtcdServer) ResumeSending() {
-	hub := s.sendhub.(*sendHub)
-	hub.resume()
+	hub := s.transport.(*rafthttp.Transport)
+	hub.Resume()
 }
 
 func startNode(cfg *ServerConfig, ids []types.ID) (id types.ID, n raft.Node, s *raft.MemoryStorage, w *wal.WAL) {
@@ -967,31 +968,4 @@ func getOtherPeerURLs(cl ClusterInfo, self string) []string {
 	}
 	sort.Strings(us)
 	return us
-}
-
-// TODO: move the function to /id pkg maybe?
-// GenID generates a random id that is not equal to 0.
-func GenID() (n uint64) {
-	for n == 0 {
-		n = uint64(rand.Int63())
-	}
-	return
-}
-
-func parseCtxErr(err error) error {
-	switch err {
-	case context.Canceled:
-		return ErrCanceled
-	case context.DeadlineExceeded:
-		return ErrTimeout
-	default:
-		return err
-	}
-}
-
-func getBool(v *bool) (vv bool, set bool) {
-	if v == nil {
-		return false, false
-	}
-	return *v, true
 }
