@@ -43,6 +43,9 @@ type ServerConfig struct {
 	NewCluster      bool
 	ForceNewCluster bool
 	Transport       *http.Transport
+
+	TickMs        uint
+	ElectionTicks int
 }
 
 // VerifyBootstrapConfig sanity-checks the initial config and returns an error
@@ -97,6 +100,8 @@ func (c *ServerConfig) print(initial bool) {
 		log.Println("etcdserver: force new cluster")
 	}
 	log.Printf("etcdserver: data dir = %s", c.DataDir)
+	log.Printf("etcdserver: heartbeat = %dms", c.TickMs)
+	log.Printf("etcdserver: election = %dms", c.ElectionTicks*int(c.TickMs))
 	log.Printf("etcdserver: snapshot count = %d", c.SnapCount)
 	if len(c.DiscoveryURL) != 0 {
 		log.Printf("etcdserver: discovery URL= %s", c.DiscoveryURL)

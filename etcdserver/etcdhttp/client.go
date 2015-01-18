@@ -37,6 +37,7 @@ import (
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/types"
+	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/store"
 	"github.com/coreos/etcd/version"
 )
@@ -46,7 +47,8 @@ const (
 	deprecatedMachinesPrefix = "/v2/machines"
 	membersPrefix            = "/v2/members"
 	statsPrefix              = "/v2/stats"
-	versionPrefix            = "/version"
+	healthPath               = "/health"
+	versionPath              = "/version"
 )
 
 // NewClientHandler generates a muxed http.Handler with the given parameters to serve etcd client requests.
@@ -74,7 +76,8 @@ func NewClientHandler(server *etcdserver.EtcdServer) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", http.NotFound)
-	mux.HandleFunc(versionPrefix, serveVersion)
+	mux.Handle(healthPath, healthHandler(server))
+	mux.HandleFunc(versionPath, serveVersion)
 	mux.Handle(keysPrefix, kh)
 	mux.Handle(keysPrefix+"/", kh)
 	mux.HandleFunc(statsPrefix+"/store", sh.serveStore)
@@ -159,14 +162,26 @@ func (h *membersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		if trimPrefix(r.URL.Path, membersPrefix) != "" {
+		switch trimPrefix(r.URL.Path, membersPrefix) {
+		case "":
+			mc := newMemberCollection(h.clusterInfo.Members())
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(mc); err != nil {
+				log.Printf("etcdhttp: %v", err)
+			}
+		case "leader":
+			id := h.server.Leader()
+			if id == 0 {
+				writeError(w, httptypes.NewHTTPError(http.StatusServiceUnavailable, "During election"))
+				return
+			}
+			m := newMember(h.clusterInfo.Member(id))
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(m); err != nil {
+				log.Printf("etcdhttp: %v", err)
+			}
+		default:
 			writeError(w, httptypes.NewHTTPError(http.StatusNotFound, "Not found"))
-			return
-		}
-		mc := newMemberCollection(h.clusterInfo.Members())
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(mc); err != nil {
-			log.Printf("etcdhttp: %v", err)
 		}
 	case "POST":
 		req := httptypes.MemberCreateRequest{}
@@ -267,6 +282,35 @@ func (h *statsHandler) serveLeader(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(stats)
+}
+
+// TODO: change etcdserver to raft interface when we have it.
+//       add test for healthHeadler when we have the interface ready.
+func healthHandler(server *etcdserver.EtcdServer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !allowMethod(w, r.Method, "GET") {
+			return
+		}
+
+		if uint64(server.Leader()) == raft.None {
+			http.Error(w, `{"health": "false"}`, http.StatusServiceUnavailable)
+			return
+		}
+
+		// wait for raft's progress
+		index := server.Index()
+		for i := 0; i < 3; i++ {
+			time.Sleep(250 * time.Millisecond)
+			if server.Index() > index {
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"health": "true"}`))
+				return
+			}
+		}
+
+		http.Error(w, `{"health": "false"}`, http.StatusServiceUnavailable)
+		return
+	}
 }
 
 func serveVersion(w http.ResponseWriter, r *http.Request) {

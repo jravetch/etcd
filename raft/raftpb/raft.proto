@@ -32,28 +32,30 @@ message Snapshot {
 }
 
 enum MessageType {
-	MsgHup       = 0;
-	MsgBeat      = 1;
-	MsgProp      = 2;
-	MsgApp       = 3;
-	MsgAppResp   = 4;
-	MsgVote      = 5;
-	MsgVoteResp  = 6;
-	MsgSnap      = 7;
-	MsgHeartbeat = 8;
+	MsgHup           = 0;
+	MsgBeat          = 1;
+	MsgProp          = 2;
+	MsgApp           = 3;
+	MsgAppResp       = 4;
+	MsgVote          = 5;
+	MsgVoteResp      = 6;
+	MsgSnap          = 7;
+	MsgHeartbeat     = 8;
+	MsgHeartbeatResp = 9;
 }
 
 message Message {
-	required MessageType type     = 1  [(gogoproto.nullable) = false];
-	required uint64      to       = 2  [(gogoproto.nullable) = false];
-	required uint64      from     = 3  [(gogoproto.nullable) = false];
-	required uint64      term     = 4  [(gogoproto.nullable) = false];
-	required uint64      logTerm  = 5  [(gogoproto.nullable) = false];
-	required uint64      index    = 6  [(gogoproto.nullable) = false];
-	repeated Entry       entries  = 7  [(gogoproto.nullable) = false];
-	required uint64      commit   = 8  [(gogoproto.nullable) = false];
-	required Snapshot    snapshot = 9  [(gogoproto.nullable) = false];
-	required bool        reject   = 10 [(gogoproto.nullable) = false];
+	required MessageType type        = 1  [(gogoproto.nullable) = false];
+	required uint64      to          = 2  [(gogoproto.nullable) = false];
+	required uint64      from        = 3  [(gogoproto.nullable) = false];
+	required uint64      term        = 4  [(gogoproto.nullable) = false];
+	required uint64      logTerm     = 5  [(gogoproto.nullable) = false];
+	required uint64      index       = 6  [(gogoproto.nullable) = false];
+	repeated Entry       entries     = 7  [(gogoproto.nullable) = false];
+	required uint64      commit      = 8  [(gogoproto.nullable) = false];
+	required Snapshot    snapshot    = 9  [(gogoproto.nullable) = false];
+	required bool        reject      = 10 [(gogoproto.nullable) = false];
+	required uint64      rejectHint  = 11 [(gogoproto.nullable) = false];
 }
 
 message HardState {

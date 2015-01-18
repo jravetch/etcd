@@ -14,26 +14,19 @@
    limitations under the License.
 */
 
-package etcdmain
+package types
 
 import (
-	"io/ioutil"
-	"log"
-	"net"
-	"net/http"
-	"time"
+	"reflect"
+	"sort"
+	"testing"
 )
 
-// serveHTTP accepts incoming HTTP connections on the listener l,
-// creating a new service goroutine for each. The service goroutines
-// read requests and then call handler to reply to them.
-func serveHTTP(l net.Listener, handler http.Handler, readTimeout time.Duration) error {
-	logger := log.New(ioutil.Discard, "etcdhttp", 0)
-	// TODO: add debug flag; enable logging when debug flag is set
-	srv := &http.Server{
-		Handler:     handler,
-		ReadTimeout: readTimeout,
-		ErrorLog:    logger, // do not log user error
+func TestUint64Slice(t *testing.T) {
+	g := Uint64Slice{10, 500, 5, 1, 100, 25}
+	w := Uint64Slice{1, 5, 10, 25, 100, 500}
+	sort.Sort(g)
+	if !reflect.DeepEqual(g, w) {
+		t.Errorf("slice after sort = %#v, want %#v", g, w)
 	}
-	return srv.Serve(l)
 }

@@ -37,6 +37,7 @@ import (
 	"github.com/coreos/etcd/etcdserver"
 	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"github.com/coreos/etcd/pkg/testutil"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/coreos/etcd/store"
@@ -54,7 +55,7 @@ func mustMarshalEvent(t *testing.T, ev *store.Event) string {
 // mustNewForm takes a set of Values and constructs a PUT *http.Request,
 // with a URL constructed from appending the given path to the standard keysPrefix
 func mustNewForm(t *testing.T, p string, vals url.Values) *http.Request {
-	u := mustNewURL(t, path.Join(keysPrefix, p))
+	u := testutil.MustNewURL(t, path.Join(keysPrefix, p))
 	req, err := http.NewRequest("PUT", u.String(), strings.NewReader(vals.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if err != nil {
@@ -66,7 +67,7 @@ func mustNewForm(t *testing.T, p string, vals url.Values) *http.Request {
 // mustNewPostForm takes a set of Values and constructs a POST *http.Request,
 // with a URL constructed from appending the given path to the standard keysPrefix
 func mustNewPostForm(t *testing.T, p string, vals url.Values) *http.Request {
-	u := mustNewURL(t, path.Join(keysPrefix, p))
+	u := testutil.MustNewURL(t, path.Join(keysPrefix, p))
 	req, err := http.NewRequest("POST", u.String(), strings.NewReader(vals.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if err != nil {
@@ -84,7 +85,7 @@ func mustNewRequest(t *testing.T, p string) *http.Request {
 func mustNewMethodRequest(t *testing.T, m, p string) *http.Request {
 	return &http.Request{
 		Method: m,
-		URL:    mustNewURL(t, path.Join(keysPrefix, p)),
+		URL:    testutil.MustNewURL(t, path.Join(keysPrefix, p)),
 	}
 }
 
@@ -92,9 +93,10 @@ type serverRecorder struct {
 	actions []action
 }
 
-func (s *serverRecorder) Start()       {}
-func (s *serverRecorder) Stop()        {}
-func (s *serverRecorder) ID() types.ID { return types.ID(1) }
+func (s *serverRecorder) Start()           {}
+func (s *serverRecorder) Stop()            {}
+func (s *serverRecorder) Leader() types.ID { return types.ID(1) }
+func (s *serverRecorder) ID() types.ID     { return types.ID(1) }
 func (s *serverRecorder) Do(_ context.Context, r etcdserverpb.Request) (etcdserver.Response, error) {
 	s.actions = append(s.actions, action{name: "Do", params: []interface{}{r}})
 	return etcdserver.Response{}, nil
@@ -139,9 +141,10 @@ type resServer struct {
 	res etcdserver.Response
 }
 
-func (rs *resServer) Start()       {}
-func (rs *resServer) Stop()        {}
-func (rs *resServer) ID() types.ID { return types.ID(1) }
+func (rs *resServer) Start()           {}
+func (rs *resServer) Stop()            {}
+func (rs *resServer) ID() types.ID     { return types.ID(1) }
+func (rs *resServer) Leader() types.ID { return types.ID(1) }
 func (rs *resServer) Do(_ context.Context, _ etcdserverpb.Request) (etcdserver.Response, error) {
 	return rs.res, nil
 }
@@ -184,7 +187,7 @@ func TestBadParseRequest(t *testing.T) {
 		{
 			// bad key prefix
 			&http.Request{
-				URL: mustNewURL(t, "/badprefix/"),
+				URL: testutil.MustNewURL(t, "/badprefix/"),
 			},
 			etcdErr.EcodeInvalidForm,
 		},
@@ -580,7 +583,58 @@ func TestServeMembers(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		req, err := http.NewRequest("GET", mustNewURL(t, tt.path).String(), nil)
+		req, err := http.NewRequest("GET", testutil.MustNewURL(t, tt.path).String(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+
+		if rw.Code != tt.wcode {
+			t.Errorf("#%d: code=%d, want %d", i, rw.Code, tt.wcode)
+		}
+		if gct := rw.Header().Get("Content-Type"); gct != tt.wct {
+			t.Errorf("#%d: content-type = %s, want %s", i, gct, tt.wct)
+		}
+		gcid := rw.Header().Get("X-Etcd-Cluster-ID")
+		wcid := cluster.ID().String()
+		if gcid != wcid {
+			t.Errorf("#%d: cid = %s, want %s", i, gcid, wcid)
+		}
+		if rw.Body.String() != tt.wbody {
+			t.Errorf("#%d: body = %q, want %q", i, rw.Body.String(), tt.wbody)
+		}
+	}
+}
+
+// TODO: consolidate **ALL** fake server implementations and add no leader test case.
+func TestServeLeader(t *testing.T) {
+	memb1 := etcdserver.Member{ID: 1, Attributes: etcdserver.Attributes{ClientURLs: []string{"http://localhost:8080"}}}
+	memb2 := etcdserver.Member{ID: 2, Attributes: etcdserver.Attributes{ClientURLs: []string{"http://localhost:8081"}}}
+	cluster := &fakeCluster{
+		id:      1,
+		members: map[uint64]*etcdserver.Member{1: &memb1, 2: &memb2},
+	}
+	h := &membersHandler{
+		server:      &serverRecorder{},
+		clock:       clockwork.NewFakeClock(),
+		clusterInfo: cluster,
+	}
+
+	wmc := string(`{"id":"1","name":"","peerURLs":[],"clientURLs":["http://localhost:8080"]}`)
+
+	tests := []struct {
+		path  string
+		wcode int
+		wct   string
+		wbody string
+	}{
+		{membersPrefix + "leader", http.StatusOK, "application/json", wmc + "\n"},
+		// TODO: add no leader case
+	}
+
+	for i, tt := range tests {
+		req, err := http.NewRequest("GET", testutil.MustNewURL(t, tt.path).String(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -605,7 +659,7 @@ func TestServeMembers(t *testing.T) {
 }
 
 func TestServeMembersCreate(t *testing.T) {
-	u := mustNewURL(t, membersPrefix)
+	u := testutil.MustNewURL(t, membersPrefix)
 	b := []byte(`{"peerURLs":["http://127.0.0.1:1"]}`)
 	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(b))
 	if err != nil {
@@ -659,7 +713,7 @@ func TestServeMembersCreate(t *testing.T) {
 func TestServeMembersDelete(t *testing.T) {
 	req := &http.Request{
 		Method: "DELETE",
-		URL:    mustNewURL(t, path.Join(membersPrefix, "BEEF")),
+		URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "BEEF")),
 	}
 	s := &serverRecorder{}
 	h := &membersHandler{
@@ -690,7 +744,7 @@ func TestServeMembersDelete(t *testing.T) {
 }
 
 func TestServeMembersUpdate(t *testing.T) {
-	u := mustNewURL(t, path.Join(membersPrefix, "1"))
+	u := testutil.MustNewURL(t, path.Join(membersPrefix, "1"))
 	b := []byte(`{"peerURLs":["http://127.0.0.1:1"]}`)
 	req, err := http.NewRequest("PUT", u.String(), bytes.NewReader(b))
 	if err != nil {
@@ -759,7 +813,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// parse body error
 			&http.Request{
-				URL:    mustNewURL(t, membersPrefix),
+				URL:    testutil.MustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader("bad json")),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -771,7 +825,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// bad content type
 			&http.Request{
-				URL:    mustNewURL(t, membersPrefix),
+				URL:    testutil.MustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/bad"}},
@@ -783,7 +837,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// bad url
 			&http.Request{
-				URL:    mustNewURL(t, membersPrefix),
+				URL:    testutil.MustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://a"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -795,7 +849,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.AddMember error
 			&http.Request{
-				URL:    mustNewURL(t, membersPrefix),
+				URL:    testutil.MustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -809,7 +863,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.AddMember error
 			&http.Request{
-				URL:    mustNewURL(t, membersPrefix),
+				URL:    testutil.MustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -823,7 +877,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.AddMember error
 			&http.Request{
-				URL:    mustNewURL(t, membersPrefix),
+				URL:    testutil.MustNewURL(t, membersPrefix),
 				Method: "POST",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -837,7 +891,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.RemoveMember error with arbitrary server error
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "1")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "1")),
 				Method: "DELETE",
 			},
 			&errServer{
@@ -849,7 +903,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.RemoveMember error with previously removed ID
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "0")),
 				Method: "DELETE",
 			},
 			&errServer{
@@ -861,7 +915,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.RemoveMember error with nonexistent ID
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "0")),
 				Method: "DELETE",
 			},
 			&errServer{
@@ -873,7 +927,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.RemoveMember error with badly formed ID
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "bad_id")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "bad_id")),
 				Method: "DELETE",
 			},
 			nil,
@@ -883,7 +937,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.RemoveMember with no ID
 			&http.Request{
-				URL:    mustNewURL(t, membersPrefix),
+				URL:    testutil.MustNewURL(t, membersPrefix),
 				Method: "DELETE",
 			},
 			nil,
@@ -893,7 +947,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// parse body error
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "0")),
 				Method: "PUT",
 				Body:   ioutil.NopCloser(strings.NewReader("bad json")),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -905,7 +959,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// bad content type
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "0")),
 				Method: "PUT",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/bad"}},
@@ -917,7 +971,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// bad url
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "0")),
 				Method: "PUT",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://a"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -929,7 +983,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.UpdateMember error
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "0")),
 				Method: "PUT",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -943,7 +997,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.UpdateMember error
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "0")),
 				Method: "PUT",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -957,7 +1011,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.UpdateMember error
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "0")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "0")),
 				Method: "PUT",
 				Body:   ioutil.NopCloser(strings.NewReader(`{"PeerURLs": ["http://127.0.0.1:1"]}`)),
 				Header: map[string][]string{"Content-Type": []string{"application/json"}},
@@ -971,7 +1025,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.UpdateMember error with badly formed ID
 			&http.Request{
-				URL:    mustNewURL(t, path.Join(membersPrefix, "bad_id")),
+				URL:    testutil.MustNewURL(t, path.Join(membersPrefix, "bad_id")),
 				Method: "PUT",
 			},
 			nil,
@@ -981,7 +1035,7 @@ func TestServeMembersFail(t *testing.T) {
 		{
 			// etcdserver.UpdateMember with no ID
 			&http.Request{
-				URL:    mustNewURL(t, membersPrefix),
+				URL:    testutil.MustNewURL(t, membersPrefix),
 				Method: "PUT",
 			},
 			nil,

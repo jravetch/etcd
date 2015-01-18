@@ -23,7 +23,6 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"os"
 	"path"
 	"regexp"
 	"sort"
@@ -33,9 +32,9 @@ import (
 	"github.com/coreos/etcd/discovery"
 	"github.com/coreos/etcd/etcdserver/etcdhttp/httptypes"
 	pb "github.com/coreos/etcd/etcdserver/etcdserverpb"
-	"github.com/coreos/etcd/etcdserver/idutil"
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/fileutil"
+	"github.com/coreos/etcd/pkg/idutil"
 	"github.com/coreos/etcd/pkg/pbutil"
 	"github.com/coreos/etcd/pkg/timeutil"
 	"github.com/coreos/etcd/pkg/types"
@@ -93,6 +92,8 @@ type Server interface {
 	Stop()
 	// ID returns the ID of the Server.
 	ID() types.ID
+	// Leader returns the ID of the leader Server.
+	Leader() types.ID
 	// Do takes a request and attempts to fulfill it, returning a Response.
 	Do(ctx context.Context, r pb.Request) (Response, error)
 	// Process takes a raft message and applies it to the server's raft state
@@ -112,47 +113,27 @@ type Server interface {
 	UpdateMember(ctx context.Context, updateMemb Member) error
 }
 
-type RaftTimer interface {
-	Index() uint64
-	Term() uint64
-}
-
 // EtcdServer is the production implementation of the Server interface
 type EtcdServer struct {
-	cfg        *ServerConfig
+	cfg *ServerConfig
+
+	r raftNode
+
 	w          wait.Wait
-	done       chan struct{}
 	stop       chan struct{}
+	done       chan struct{}
+	errorc     chan error
 	id         types.ID
 	attributes Attributes
 
 	Cluster *Cluster
-
-	node        raft.Node
-	raftStorage *raft.MemoryStorage
-	storage     Storage
 
 	store store.Store
 
 	stats  *stats.ServerStats
 	lstats *stats.LeaderStats
 
-	// transport specifies the transport to send and receive msgs to members.
-	// Sending messages MUST NOT block. It is okay to drop messages, since
-	// clients should timeout and reissue their messages.
-	// If transport is nil, server will panic.
-	transport rafthttp.Transporter
-
-	Ticker     <-chan time.Time
 	SyncTicker <-chan time.Time
-
-	snapCount uint64 // number of entries to trigger a snapshot
-
-	// Cache of the latest raft index and raft term the server has seen
-	raftIndex uint64
-	raftTerm  uint64
-
-	raftLead uint64
 
 	reqIDGen *idutil.Generator
 }
@@ -219,7 +200,6 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 		if cfg.ShouldDiscover() {
 			log.Printf("etcdserver: discovery token ignored since a cluster has already been initialized. Valid log found at %q", cfg.WALDir())
 		}
-		var index uint64
 		snapshot, err := ss.Load()
 		if err != nil && err != snap.ErrNoSnapshot {
 			return nil, err
@@ -229,7 +209,6 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 				log.Panicf("etcdserver: recovered store from snapshot error: %v", err)
 			}
 			log.Printf("etcdserver: recovered store from snapshot at index %d", snapshot.Metadata.Index)
-			index = snapshot.Metadata.Index
 		}
 		cfg.Cluster = NewClusterFromStore(cfg.Cluster.token, st)
 		cfg.Print()
@@ -237,9 +216,9 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 			log.Printf("etcdserver: loaded cluster information from store: %s", cfg.Cluster)
 		}
 		if !cfg.ForceNewCluster {
-			id, n, s, w = restartNode(cfg, index+1, snapshot)
+			id, n, s, w = restartNode(cfg, snapshot)
 		} else {
-			id, n, s, w = restartAsStandaloneNode(cfg, index+1, snapshot)
+			id, n, s, w = restartAsStandaloneNode(cfg, snapshot)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported bootstrap config")
@@ -252,37 +231,33 @@ func NewServer(cfg *ServerConfig) (*EtcdServer, error) {
 	lstats := stats.NewLeaderStats(id.String())
 
 	srv := &EtcdServer{
-		cfg:         cfg,
-		store:       st,
-		node:        n,
-		raftStorage: s,
-		id:          id,
-		attributes:  Attributes{Name: cfg.Name, ClientURLs: cfg.ClientURLs.StringSlice()},
-		Cluster:     cfg.Cluster,
-		storage:     NewStorage(w, ss),
-		stats:       sstats,
-		lstats:      lstats,
-		Ticker:      time.Tick(100 * time.Millisecond),
-		SyncTicker:  time.Tick(500 * time.Millisecond),
-		snapCount:   cfg.SnapCount,
-		reqIDGen:    idutil.NewGenerator(uint8(id), time.Now()),
+		cfg:    cfg,
+		errorc: make(chan error, 1),
+		store:  st,
+		r: raftNode{
+			Node:        n,
+			snapCount:   cfg.SnapCount,
+			ticker:      time.Tick(time.Duration(cfg.TickMs) * time.Millisecond),
+			raftStorage: s,
+			storage:     NewStorage(w, ss),
+		},
+		id:         id,
+		attributes: Attributes{Name: cfg.Name, ClientURLs: cfg.ClientURLs.StringSlice()},
+		Cluster:    cfg.Cluster,
+		stats:      sstats,
+		lstats:     lstats,
+		SyncTicker: time.Tick(500 * time.Millisecond),
+		reqIDGen:   idutil.NewGenerator(uint8(id), time.Now()),
 	}
-	tr := &rafthttp.Transport{
-		RoundTripper: cfg.Transport,
-		ID:           id,
-		ClusterID:    cfg.Cluster.ID(),
-		Raft:         srv,
-		ServerStats:  sstats,
-		LeaderStats:  lstats,
-	}
-	tr.Start()
+
+	tr := rafthttp.NewTransporter(cfg.Transport, id, cfg.Cluster.ID(), srv, srv.errorc, sstats, lstats)
 	// add all the remote members into sendhub
 	for _, m := range cfg.Cluster.Members() {
 		if m.Name != cfg.Name {
 			tr.AddPeer(m.ID, m.PeerURLs)
 		}
 	}
-	srv.transport = tr
+	srv.r.transport = tr
 	return srv, nil
 }
 
@@ -299,9 +274,9 @@ func (s *EtcdServer) Start() {
 // modify a server's fields after it has been sent to Start.
 // This function is just used for testing.
 func (s *EtcdServer) start() {
-	if s.snapCount == 0 {
+	if s.r.snapCount == 0 {
 		log.Printf("etcdserver: set snapshot count to default %d", DefaultSnapCount)
-		s.snapCount = DefaultSnapCount
+		s.r.snapCount = DefaultSnapCount
 	}
 	s.w = wait.New()
 	s.done = make(chan struct{})
@@ -332,7 +307,7 @@ func (s *EtcdServer) purgeFile() {
 
 func (s *EtcdServer) ID() types.ID { return s.id }
 
-func (s *EtcdServer) RaftHandler() http.Handler { return s.transport.Handler() }
+func (s *EtcdServer) RaftHandler() http.Handler { return s.r.transport.Handler() }
 
 func (s *EtcdServer) Process(ctx context.Context, m raftpb.Message) error {
 	if s.Cluster.IsIDRemoved(types.ID(m.From)) {
@@ -342,16 +317,15 @@ func (s *EtcdServer) Process(ctx context.Context, m raftpb.Message) error {
 	if m.Type == raftpb.MsgApp {
 		s.stats.RecvAppendReq(types.ID(m.From).String(), m.Size())
 	}
-	return s.node.Step(ctx, m)
+	return s.r.Step(ctx, m)
 }
 
 func (s *EtcdServer) run() {
 	var syncC <-chan time.Time
 	var shouldstop bool
-	shouldstopC := s.transport.ShouldStopNotify()
 
 	// load initial state from raft storage
-	snap, err := s.raftStorage.Snapshot()
+	snap, err := s.r.raftStorage.Snapshot()
 	if err != nil {
 		log.Panicf("etcdserver: get snapshot from raft storage error: %v", err)
 	}
@@ -361,20 +335,21 @@ func (s *EtcdServer) run() {
 	confState := snap.Metadata.ConfState
 
 	defer func() {
-		s.node.Stop()
-		s.transport.Stop()
-		if err := s.storage.Close(); err != nil {
+		s.r.Stop()
+		s.r.transport.Stop()
+		if err := s.r.storage.Close(); err != nil {
 			log.Panicf("etcdserver: close storage error: %v", err)
 		}
 		close(s.done)
 	}()
+	// TODO: make raft loop a method on raftNode
 	for {
 		select {
-		case <-s.Ticker:
-			s.node.Tick()
-		case rd := <-s.node.Ready():
+		case <-s.r.ticker:
+			s.r.Tick()
+		case rd := <-s.r.Ready():
 			if rd.SoftState != nil {
-				atomic.StoreUint64(&s.raftLead, rd.SoftState.Lead)
+				atomic.StoreUint64(&s.r.lead, rd.SoftState.Lead)
 				if rd.RaftState == raft.StateLeader {
 					syncC = s.SyncTicker
 					// TODO: remove the nil checking
@@ -389,18 +364,18 @@ func (s *EtcdServer) run() {
 
 			// apply snapshot to storage if it is more updated than current snapi
 			if !raft.IsEmptySnap(rd.Snapshot) && rd.Snapshot.Metadata.Index > snapi {
-				if err := s.storage.SaveSnap(rd.Snapshot); err != nil {
+				if err := s.r.storage.SaveSnap(rd.Snapshot); err != nil {
 					log.Fatalf("etcdserver: save snapshot error: %v", err)
 				}
-				s.raftStorage.ApplySnapshot(rd.Snapshot)
+				s.r.raftStorage.ApplySnapshot(rd.Snapshot)
 				snapi = rd.Snapshot.Metadata.Index
 				log.Printf("etcdserver: saved incoming snapshot at index %d", snapi)
 			}
 
-			if err := s.storage.Save(rd.HardState, rd.Entries); err != nil {
+			if err := s.r.storage.Save(rd.HardState, rd.Entries); err != nil {
 				log.Fatalf("etcdserver: save state and entries error: %v", err)
 			}
-			s.raftStorage.Append(rd.Entries)
+			s.r.raftStorage.Append(rd.Entries)
 
 			s.send(rd.Messages)
 
@@ -427,21 +402,23 @@ func (s *EtcdServer) run() {
 				}
 				if len(ents) > 0 {
 					if appliedi, shouldstop = s.apply(ents, &confState); shouldstop {
-						return
+						go s.stopWithDelay(10*100*time.Millisecond, fmt.Errorf("the member has been permanently removed from the cluster"))
 					}
 				}
 			}
 
-			s.node.Advance()
+			s.r.Advance()
 
-			if appliedi-snapi > s.snapCount {
+			if appliedi-snapi > s.r.snapCount {
 				log.Printf("etcdserver: start to snapshot (applied: %d, lastsnap: %d)", appliedi, snapi)
 				s.snapshot(appliedi, &confState)
 				snapi = appliedi
 			}
 		case <-syncC:
 			s.sync(defaultSyncTimeout)
-		case <-shouldstopC:
+		case err := <-s.errorc:
+			log.Printf("etcdserver: %s", err)
+			log.Printf("etcdserver: the data-dir used by this member must be removed.")
 			return
 		case <-s.stop:
 			return
@@ -458,6 +435,14 @@ func (s *EtcdServer) Stop() {
 		return
 	}
 	<-s.done
+}
+
+func (s *EtcdServer) stopWithDelay(d time.Duration, err error) {
+	time.Sleep(d)
+	select {
+	case s.errorc <- err:
+	default:
+	}
 }
 
 // StopNotify returns a channel that receives a empty struct
@@ -481,7 +466,7 @@ func (s *EtcdServer) Do(ctx context.Context, r pb.Request) (Response, error) {
 			return Response{}, err
 		}
 		ch := s.w.Register(r.ID)
-		s.node.Propose(ctx, data)
+		s.r.Propose(ctx, data)
 		select {
 		case x := <-ch:
 			resp := x.(Response)
@@ -521,7 +506,7 @@ func (s *EtcdServer) Do(ctx context.Context, r pb.Request) (Response, error) {
 func (s *EtcdServer) SelfStats() []byte { return s.stats.JSON() }
 
 func (s *EtcdServer) LeaderStats() []byte {
-	lead := atomic.LoadUint64(&s.raftLead)
+	lead := atomic.LoadUint64(&s.r.lead)
 	if lead != uint64(s.id) {
 		return nil
 	}
@@ -566,14 +551,16 @@ func (s *EtcdServer) UpdateMember(ctx context.Context, memb Member) error {
 }
 
 // Implement the RaftTimer interface
-func (s *EtcdServer) Index() uint64 { return atomic.LoadUint64(&s.raftIndex) }
+func (s *EtcdServer) Index() uint64 { return atomic.LoadUint64(&s.r.index) }
 
-func (s *EtcdServer) Term() uint64 { return atomic.LoadUint64(&s.raftTerm) }
+func (s *EtcdServer) Term() uint64 { return atomic.LoadUint64(&s.r.term) }
 
 // Only for testing purpose
 // TODO: add Raft server interface to expose raft related info:
 // Index, Term, Lead, Committed, Applied, LastIndex, etc.
-func (s *EtcdServer) Lead() uint64 { return atomic.LoadUint64(&s.raftLead) }
+func (s *EtcdServer) Lead() uint64 { return atomic.LoadUint64(&s.r.lead) }
+
+func (s *EtcdServer) Leader() types.ID { return types.ID(s.Lead()) }
 
 // configure sends a configuration change through consensus and
 // then waits for it to be applied to the server. It
@@ -581,7 +568,7 @@ func (s *EtcdServer) Lead() uint64 { return atomic.LoadUint64(&s.raftLead) }
 func (s *EtcdServer) configure(ctx context.Context, cc raftpb.ConfChange) error {
 	cc.ID = s.reqIDGen.Next()
 	ch := s.w.Register(cc.ID)
-	if err := s.node.ProposeConfChange(ctx, cc); err != nil {
+	if err := s.r.ProposeConfChange(ctx, cc); err != nil {
 		s.w.Trigger(cc.ID, nil)
 		return err
 	}
@@ -616,7 +603,7 @@ func (s *EtcdServer) sync(timeout time.Duration) {
 	// There is no promise that node has leader when do SYNC request,
 	// so it uses goroutine to propose.
 	go func() {
-		s.node.Propose(ctx, data)
+		s.r.Propose(ctx, data)
 		cancel()
 	}()
 }
@@ -661,7 +648,7 @@ func (s *EtcdServer) send(ms []raftpb.Message) {
 			m.To = 0
 		}
 	}
-	s.transport.Send(ms)
+	s.r.transport.Send(ms)
 }
 
 // apply takes entries received from Raft (after it has been committed) and
@@ -669,6 +656,8 @@ func (s *EtcdServer) send(ms []raftpb.Message) {
 // The given entries should not be empty.
 func (s *EtcdServer) apply(es []raftpb.Entry, confState *raftpb.ConfState) (uint64, bool) {
 	var applied uint64
+	var shouldstop bool
+	var err error
 	for i := range es {
 		e := es[i]
 		switch e.Type {
@@ -679,19 +668,16 @@ func (s *EtcdServer) apply(es []raftpb.Entry, confState *raftpb.ConfState) (uint
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
 			pbutil.MustUnmarshal(&cc, e.Data)
-			shouldstop, err := s.applyConfChange(cc, confState)
+			shouldstop, err = s.applyConfChange(cc, confState)
 			s.w.Trigger(cc.ID, err)
-			if shouldstop {
-				return applied, true
-			}
 		default:
 			log.Panicf("entry type should be either EntryNormal or EntryConfChange")
 		}
-		atomic.StoreUint64(&s.raftIndex, e.Index)
-		atomic.StoreUint64(&s.raftTerm, e.Term)
+		atomic.StoreUint64(&s.r.index, e.Index)
+		atomic.StoreUint64(&s.r.term, e.Term)
 		applied = e.Index
 	}
-	return applied, false
+	return applied, shouldstop
 }
 
 // applyRequest interprets r as a call to store.X and returns a Response interpreted
@@ -748,10 +734,10 @@ func (s *EtcdServer) applyRequest(r pb.Request) Response {
 func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.ConfState) (bool, error) {
 	if err := s.Cluster.ValidateConfigurationChange(cc); err != nil {
 		cc.NodeID = raft.None
-		s.node.ApplyConfChange(cc)
+		s.r.ApplyConfChange(cc)
 		return false, err
 	}
-	*confState = *s.node.ApplyConfChange(cc)
+	*confState = *s.r.ApplyConfChange(cc)
 	switch cc.Type {
 	case raftpb.ConfChangeAddNode:
 		m := new(Member)
@@ -765,18 +751,16 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 		if m.ID == s.id {
 			log.Printf("etcdserver: added local member %s %v to cluster %s", m.ID, m.PeerURLs, s.Cluster.ID())
 		} else {
-			s.transport.AddPeer(m.ID, m.PeerURLs)
+			s.r.transport.AddPeer(m.ID, m.PeerURLs)
 			log.Printf("etcdserver: added member %s %v to cluster %s", m.ID, m.PeerURLs, s.Cluster.ID())
 		}
 	case raftpb.ConfChangeRemoveNode:
 		id := types.ID(cc.NodeID)
 		s.Cluster.RemoveMember(id)
 		if id == s.id {
-			log.Printf("etcdserver: removed local member %s from cluster %s", id, s.Cluster.ID())
-			log.Println("etcdserver: the data-dir used by this member must be removed so that this host can be re-added with a new member ID")
 			return true, nil
 		} else {
-			s.transport.RemovePeer(id)
+			s.r.transport.RemovePeer(id)
 			log.Printf("etcdserver: removed member %s from cluster %s", id, s.Cluster.ID())
 		}
 	case raftpb.ConfChangeUpdateNode:
@@ -791,7 +775,7 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 		if m.ID == s.id {
 			log.Printf("etcdserver: update local member %s %v in cluster %s", m.ID, m.PeerURLs, s.Cluster.ID())
 		} else {
-			s.transport.UpdatePeer(m.ID, m.PeerURLs)
+			s.r.transport.UpdatePeer(m.ID, m.PeerURLs)
 			log.Printf("etcdserver: update member %s %v in cluster %s", m.ID, m.PeerURLs, s.Cluster.ID())
 		}
 	}
@@ -806,7 +790,7 @@ func (s *EtcdServer) snapshot(snapi uint64, confState *raftpb.ConfState) {
 	if err != nil {
 		log.Panicf("etcdserver: store save should never fail: %v", err)
 	}
-	err = s.raftStorage.Compact(snapi, confState, d)
+	err = s.r.raftStorage.Compact(snapi, confState, d)
 	if err != nil {
 		// the snapshot was done asynchronously with the progress of raft.
 		// raft might have already got a newer snapshot and called compact.
@@ -817,74 +801,22 @@ func (s *EtcdServer) snapshot(snapi uint64, confState *raftpb.ConfState) {
 	}
 	log.Printf("etcdserver: compacted log at index %d", snapi)
 
-	if err := s.storage.Cut(); err != nil {
+	if err := s.r.storage.Cut(); err != nil {
 		log.Panicf("etcdserver: rotate wal file should never fail: %v", err)
 	}
-	snap, err := s.raftStorage.Snapshot()
+	snap, err := s.r.raftStorage.Snapshot()
 	if err != nil {
 		log.Panicf("etcdserver: snapshot error: %v", err)
 	}
-	if err := s.storage.SaveSnap(snap); err != nil {
+	if err := s.r.storage.SaveSnap(snap); err != nil {
 		log.Fatalf("etcdserver: save snapshot error: %v", err)
 	}
 	log.Printf("etcdserver: saved snapshot at index %d", snap.Metadata.Index)
 }
 
-// for testing
-func (s *EtcdServer) PauseSending() {
-	hub := s.transport.(*rafthttp.Transport)
-	hub.Pause()
-}
+func (s *EtcdServer) PauseSending() { s.r.pauseSending() }
 
-func (s *EtcdServer) ResumeSending() {
-	hub := s.transport.(*rafthttp.Transport)
-	hub.Resume()
-}
-
-func startNode(cfg *ServerConfig, ids []types.ID) (id types.ID, n raft.Node, s *raft.MemoryStorage, w *wal.WAL) {
-	var err error
-	member := cfg.Cluster.MemberByName(cfg.Name)
-	metadata := pbutil.MustMarshal(
-		&pb.Metadata{
-			NodeID:    uint64(member.ID),
-			ClusterID: uint64(cfg.Cluster.ID()),
-		},
-	)
-	if err := os.MkdirAll(cfg.SnapDir(), privateDirMode); err != nil {
-		log.Fatalf("etcdserver create snapshot directory error: %v", err)
-	}
-	if w, err = wal.Create(cfg.WALDir(), metadata); err != nil {
-		log.Fatalf("etcdserver: create wal error: %v", err)
-	}
-	peers := make([]raft.Peer, len(ids))
-	for i, id := range ids {
-		ctx, err := json.Marshal((*cfg.Cluster).Member(id))
-		if err != nil {
-			log.Panicf("marshal member should never fail: %v", err)
-		}
-		peers[i] = raft.Peer{ID: uint64(id), Context: ctx}
-	}
-	id = member.ID
-	log.Printf("etcdserver: start member %s in cluster %s", id, cfg.Cluster.ID())
-	s = raft.NewMemoryStorage()
-	n = raft.StartNode(uint64(id), peers, 10, 1, s)
-	return
-}
-
-func restartNode(cfg *ServerConfig, index uint64, snapshot *raftpb.Snapshot) (types.ID, raft.Node, *raft.MemoryStorage, *wal.WAL) {
-	w, id, cid, st, ents := readWAL(cfg.WALDir(), index)
-	cfg.Cluster.SetID(cid)
-
-	log.Printf("etcdserver: restart member %s in cluster %s at commit index %d", id, cfg.Cluster.ID(), st.Commit)
-	s := raft.NewMemoryStorage()
-	if snapshot != nil {
-		s.ApplySnapshot(*snapshot)
-	}
-	s.SetHardState(st)
-	s.Append(ents)
-	n := raft.RestartNode(uint64(id), 10, 1, s)
-	return id, n, s, w
-}
+func (s *EtcdServer) ResumeSending() { s.r.resumeSending() }
 
 // isBootstrapped tries to check if the given member has been bootstrapped
 // in the given cluster.

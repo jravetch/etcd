@@ -26,13 +26,12 @@ import (
 	"path"
 	"reflect"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	pb "github.com/coreos/etcd/etcdserver/etcdserverpb"
-	"github.com/coreos/etcd/etcdserver/idutil"
+	"github.com/coreos/etcd/pkg/idutil"
 	"github.com/coreos/etcd/pkg/pbutil"
 	"github.com/coreos/etcd/pkg/testutil"
 	"github.com/coreos/etcd/pkg/types"
@@ -49,35 +48,35 @@ func TestDoLocalAction(t *testing.T) {
 
 		wresp    Response
 		werr     error
-		wactions []action
+		wactions []testutil.Action
 	}{
 		{
 			pb.Request{Method: "GET", ID: 1, Wait: true},
-			Response{Watcher: &stubWatcher{}}, nil, []action{action{name: "Watch"}},
+			Response{Watcher: &nopWatcher{}}, nil, []testutil.Action{{Name: "Watch"}},
 		},
 		{
 			pb.Request{Method: "GET", ID: 1},
 			Response{Event: &store.Event{}}, nil,
-			[]action{
-				action{
-					name:   "Get",
-					params: []interface{}{"", false, false},
+			[]testutil.Action{
+				{
+					Name:   "Get",
+					Params: []interface{}{"", false, false},
 				},
 			},
 		},
 		{
 			pb.Request{Method: "HEAD", ID: 1},
 			Response{Event: &store.Event{}}, nil,
-			[]action{
-				action{
-					name:   "Get",
-					params: []interface{}{"", false, false},
+			[]testutil.Action{
+				{
+					Name:   "Get",
+					Params: []interface{}{"", false, false},
 				},
 			},
 		},
 		{
 			pb.Request{Method: "BADMETHOD", ID: 1},
-			Response{}, ErrUnknownMethod, []action{},
+			Response{}, ErrUnknownMethod, []testutil.Action{},
 		},
 	}
 	for i, tt := range tests {
@@ -108,19 +107,29 @@ func TestDoBadLocalAction(t *testing.T) {
 	tests := []struct {
 		req pb.Request
 
-		wactions []action
+		wactions []testutil.Action
 	}{
 		{
 			pb.Request{Method: "GET", ID: 1, Wait: true},
-			[]action{action{name: "Watch"}},
+			[]testutil.Action{{Name: "Watch"}},
 		},
 		{
 			pb.Request{Method: "GET", ID: 1},
-			[]action{action{name: "Get"}},
+			[]testutil.Action{
+				{
+					Name:   "Get",
+					Params: []interface{}{"", false, false},
+				},
+			},
 		},
 		{
 			pb.Request{Method: "HEAD", ID: 1},
-			[]action{action{name: "Get"}},
+			[]testutil.Action{
+				{
+					Name:   "Get",
+					Params: []interface{}{"", false, false},
+				},
+			},
 		},
 	}
 	for i, tt := range tests {
@@ -149,16 +158,16 @@ func TestApplyRequest(t *testing.T) {
 		req pb.Request
 
 		wresp    Response
-		wactions []action
+		wactions []testutil.Action
 	}{
 		// POST ==> Create
 		{
 			pb.Request{Method: "POST", ID: 1},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Create",
-					params: []interface{}{"", false, "", true, time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "Create",
+					Params: []interface{}{"", false, "", true, time.Time{}},
 				},
 			},
 		},
@@ -166,10 +175,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "POST", ID: 1, Expiration: 1337},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Create",
-					params: []interface{}{"", false, "", true, time.Unix(0, 1337)},
+			[]testutil.Action{
+				{
+					Name:   "Create",
+					Params: []interface{}{"", false, "", true, time.Unix(0, 1337)},
 				},
 			},
 		},
@@ -177,10 +186,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "POST", ID: 1, Dir: true},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Create",
-					params: []interface{}{"", true, "", true, time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "Create",
+					Params: []interface{}{"", true, "", true, time.Time{}},
 				},
 			},
 		},
@@ -188,10 +197,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Set",
-					params: []interface{}{"", false, "", time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "Set",
+					Params: []interface{}{"", false, "", time.Time{}},
 				},
 			},
 		},
@@ -199,10 +208,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1, Dir: true},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Set",
-					params: []interface{}{"", true, "", time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "Set",
+					Params: []interface{}{"", true, "", time.Time{}},
 				},
 			},
 		},
@@ -210,10 +219,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1, PrevExist: pbutil.Boolp(true)},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Update",
-					params: []interface{}{"", "", time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "Update",
+					Params: []interface{}{"", "", time.Time{}},
 				},
 			},
 		},
@@ -221,10 +230,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1, PrevExist: pbutil.Boolp(false)},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Create",
-					params: []interface{}{"", false, "", false, time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "Create",
+					Params: []interface{}{"", false, "", false, time.Time{}},
 				},
 			},
 		},
@@ -233,10 +242,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1, PrevExist: pbutil.Boolp(true), PrevIndex: 1},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Update",
-					params: []interface{}{"", "", time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "Update",
+					Params: []interface{}{"", "", time.Time{}},
 				},
 			},
 		},
@@ -245,10 +254,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1, PrevExist: pbutil.Boolp(false), PrevIndex: 1},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Create",
-					params: []interface{}{"", false, "", false, time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "Create",
+					Params: []interface{}{"", false, "", false, time.Time{}},
 				},
 			},
 		},
@@ -256,10 +265,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1, PrevIndex: 1},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "CompareAndSwap",
-					params: []interface{}{"", "", uint64(1), "", time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "CompareAndSwap",
+					Params: []interface{}{"", "", uint64(1), "", time.Time{}},
 				},
 			},
 		},
@@ -267,10 +276,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1, PrevValue: "bar"},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "CompareAndSwap",
-					params: []interface{}{"", "bar", uint64(0), "", time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "CompareAndSwap",
+					Params: []interface{}{"", "bar", uint64(0), "", time.Time{}},
 				},
 			},
 		},
@@ -278,10 +287,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "PUT", ID: 1, PrevIndex: 1, PrevValue: "bar"},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "CompareAndSwap",
-					params: []interface{}{"", "bar", uint64(1), "", time.Time{}},
+			[]testutil.Action{
+				{
+					Name:   "CompareAndSwap",
+					Params: []interface{}{"", "bar", uint64(1), "", time.Time{}},
 				},
 			},
 		},
@@ -289,10 +298,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "DELETE", ID: 1},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Delete",
-					params: []interface{}{"", false, false},
+			[]testutil.Action{
+				{
+					Name:   "Delete",
+					Params: []interface{}{"", false, false},
 				},
 			},
 		},
@@ -300,10 +309,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "DELETE", ID: 1, PrevIndex: 1},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "CompareAndDelete",
-					params: []interface{}{"", "", uint64(1)},
+			[]testutil.Action{
+				{
+					Name:   "CompareAndDelete",
+					Params: []interface{}{"", "", uint64(1)},
 				},
 			},
 		},
@@ -311,10 +320,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "DELETE", ID: 1, PrevValue: "bar"},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "CompareAndDelete",
-					params: []interface{}{"", "bar", uint64(0)},
+			[]testutil.Action{
+				{
+					Name:   "CompareAndDelete",
+					Params: []interface{}{"", "bar", uint64(0)},
 				},
 			},
 		},
@@ -322,10 +331,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "DELETE", ID: 1, PrevIndex: 5, PrevValue: "bar"},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "CompareAndDelete",
-					params: []interface{}{"", "bar", uint64(5)},
+			[]testutil.Action{
+				{
+					Name:   "CompareAndDelete",
+					Params: []interface{}{"", "bar", uint64(5)},
 				},
 			},
 		},
@@ -333,10 +342,10 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "QGET", ID: 1},
 			Response{Event: &store.Event{}},
-			[]action{
-				action{
-					name:   "Get",
-					params: []interface{}{"", false, false},
+			[]testutil.Action{
+				{
+					Name:   "Get",
+					Params: []interface{}{"", false, false},
 				},
 			},
 		},
@@ -344,20 +353,20 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "SYNC", ID: 1},
 			Response{},
-			[]action{
-				action{
-					name:   "DeleteExpiredKeys",
-					params: []interface{}{time.Unix(0, 0)},
+			[]testutil.Action{
+				{
+					Name:   "DeleteExpiredKeys",
+					Params: []interface{}{time.Unix(0, 0)},
 				},
 			},
 		},
 		{
 			pb.Request{Method: "SYNC", ID: 1, Time: 12345},
 			Response{},
-			[]action{
-				action{
-					name:   "DeleteExpiredKeys",
-					params: []interface{}{time.Unix(0, 12345)},
+			[]testutil.Action{
+				{
+					Name:   "DeleteExpiredKeys",
+					Params: []interface{}{time.Unix(0, 12345)},
 				},
 			},
 		},
@@ -365,7 +374,7 @@ func TestApplyRequest(t *testing.T) {
 		{
 			pb.Request{Method: "BADMETHOD", ID: 1},
 			Response{err: ErrUnknownMethod},
-			[]action{},
+			[]testutil.Action{},
 		},
 	}
 
@@ -447,7 +456,7 @@ func TestApplyConfChangeError(t *testing.T) {
 	for i, tt := range tests {
 		n := &nodeRecorder{}
 		srv := &EtcdServer{
-			node:    n,
+			r:       raftNode{Node: n},
 			Cluster: cl,
 		}
 		_, err := srv.applyConfChange(tt.cc, nil)
@@ -455,10 +464,10 @@ func TestApplyConfChangeError(t *testing.T) {
 			t.Errorf("#%d: applyConfChange error = %v, want %v", i, err, tt.werr)
 		}
 		cc := raftpb.ConfChange{Type: tt.cc.Type, NodeID: raft.None}
-		w := []action{
+		w := []testutil.Action{
 			{
-				name:   "ApplyConfChange",
-				params: []interface{}{cc},
+				Name:   "ApplyConfChange",
+				Params: []interface{}{cc},
 			},
 		}
 		if g := n.Action(); !reflect.DeepEqual(g, w) {
@@ -474,10 +483,12 @@ func TestApplyConfChangeShouldStop(t *testing.T) {
 		cl.AddMember(&Member{ID: types.ID(i)})
 	}
 	srv := &EtcdServer{
-		id:        1,
-		node:      &nodeRecorder{},
-		Cluster:   cl,
-		transport: &nopTransporter{},
+		id: 1,
+		r: raftNode{
+			Node:      &nodeRecorder{},
+			transport: &nopTransporter{},
+		},
+		Cluster: cl,
 	}
 	cc := raftpb.ConfChange{
 		Type:   raftpb.ConfChangeRemoveNode,
@@ -513,12 +524,14 @@ func TestDoProposal(t *testing.T) {
 	for i, tt := range tests {
 		st := &storeRecorder{}
 		srv := &EtcdServer{
-			node:        newNodeCommitter(),
-			raftStorage: raft.NewMemoryStorage(),
-			store:       st,
-			transport:   &nopTransporter{},
-			storage:     &storageRecorder{},
-			reqIDGen:    idutil.NewGenerator(0, time.Time{}),
+			r: raftNode{
+				Node:        newNodeCommitter(),
+				storage:     &storageRecorder{},
+				raftStorage: raft.NewMemoryStorage(),
+				transport:   &nopTransporter{},
+			},
+			store:    st,
+			reqIDGen: idutil.NewGenerator(0, time.Time{}),
 		}
 		srv.start()
 		resp, err := srv.Do(context.Background(), tt)
@@ -541,7 +554,7 @@ func TestDoProposal(t *testing.T) {
 func TestDoProposalCancelled(t *testing.T) {
 	wait := &waitRecorder{}
 	srv := &EtcdServer{
-		node:     &nodeRecorder{},
+		r:        raftNode{Node: &nodeRecorder{}},
 		w:        wait,
 		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
@@ -552,7 +565,7 @@ func TestDoProposalCancelled(t *testing.T) {
 	if err != ErrCanceled {
 		t.Fatalf("err = %v, want %v", err, ErrCanceled)
 	}
-	w := []action{action{name: "Register"}, action{name: "Trigger"}}
+	w := []testutil.Action{{Name: "Register"}, {Name: "Trigger"}}
 	if !reflect.DeepEqual(wait.action, w) {
 		t.Errorf("wait.action = %+v, want %+v", wait.action, w)
 	}
@@ -560,7 +573,7 @@ func TestDoProposalCancelled(t *testing.T) {
 
 func TestDoProposalTimeout(t *testing.T) {
 	srv := &EtcdServer{
-		node:     &nodeRecorder{},
+		r:        raftNode{Node: &nodeRecorder{}},
 		w:        &waitRecorder{},
 		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
@@ -573,7 +586,7 @@ func TestDoProposalTimeout(t *testing.T) {
 
 func TestDoProposalStopped(t *testing.T) {
 	srv := &EtcdServer{
-		node:     &nodeRecorder{},
+		r:        raftNode{Node: &nodeRecorder{}},
 		w:        &waitRecorder{},
 		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
@@ -589,7 +602,7 @@ func TestDoProposalStopped(t *testing.T) {
 func TestSync(t *testing.T) {
 	n := &nodeRecorder{}
 	srv := &EtcdServer{
-		node:     n,
+		r:        raftNode{Node: n},
 		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
 	// check that sync is non-blocking
@@ -604,10 +617,10 @@ func TestSync(t *testing.T) {
 	if len(action) != 1 {
 		t.Fatalf("len(action) = %d, want 1", len(action))
 	}
-	if action[0].name != "Propose" {
-		t.Fatalf("action = %s, want Propose", action[0].name)
+	if action[0].Name != "Propose" {
+		t.Fatalf("action = %s, want Propose", action[0].Name)
 	}
-	data := action[0].params[0].([]byte)
+	data := action[0].Params[0].([]byte)
 	var r pb.Request
 	if err := r.Unmarshal(data); err != nil {
 		t.Fatalf("unmarshal request error: %v", err)
@@ -622,7 +635,7 @@ func TestSync(t *testing.T) {
 func TestSyncTimeout(t *testing.T) {
 	n := &nodeProposalBlockerRecorder{}
 	srv := &EtcdServer{
-		node:     n,
+		r:        raftNode{Node: n},
 		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
 	// check that sync is non-blocking
@@ -634,7 +647,7 @@ func TestSyncTimeout(t *testing.T) {
 
 	// give time for goroutine in sync to cancel
 	testutil.ForceGosched()
-	w := []action{action{name: "Propose blocked"}}
+	w := []testutil.Action{{Name: "Propose blocked"}}
 	if g := n.Action(); !reflect.DeepEqual(g, w) {
 		t.Errorf("action = %v, want %v", g, w)
 	}
@@ -647,13 +660,15 @@ func TestSyncTrigger(t *testing.T) {
 	n := newReadyNode()
 	st := make(chan time.Time, 1)
 	srv := &EtcdServer{
-		node:        n,
-		raftStorage: raft.NewMemoryStorage(),
-		store:       &storeRecorder{},
-		transport:   &nopTransporter{},
-		storage:     &storageRecorder{},
-		SyncTicker:  st,
-		reqIDGen:    idutil.NewGenerator(0, time.Time{}),
+		r: raftNode{
+			Node:        n,
+			raftStorage: raft.NewMemoryStorage(),
+			transport:   &nopTransporter{},
+			storage:     &storageRecorder{},
+		},
+		store:      &storeRecorder{},
+		SyncTicker: st,
+		reqIDGen:   idutil.NewGenerator(0, time.Time{}),
 	}
 	srv.start()
 	defer srv.Stop()
@@ -671,10 +686,10 @@ func TestSyncTrigger(t *testing.T) {
 	if len(action) != 1 {
 		t.Fatalf("len(action) = %d, want 1", len(action))
 	}
-	if action[0].name != "Propose" {
-		t.Fatalf("action = %s, want Propose", action[0].name)
+	if action[0].Name != "Propose" {
+		t.Fatalf("action = %s, want Propose", action[0].Name)
 	}
-	data := action[0].params[0].([]byte)
+	data := action[0].Params[0].([]byte)
 	var req pb.Request
 	if err := req.Unmarshal(data); err != nil {
 		t.Fatalf("error unmarshalling data: %v", err)
@@ -691,27 +706,29 @@ func TestSnapshot(t *testing.T) {
 	st := &storeRecorder{}
 	p := &storageRecorder{}
 	srv := &EtcdServer{
-		node:        &nodeRecorder{},
-		raftStorage: s,
-		store:       st,
-		storage:     p,
+		r: raftNode{
+			Node:        &nodeRecorder{},
+			raftStorage: s,
+			storage:     p,
+		},
+		store: st,
 	}
 	srv.snapshot(1, &raftpb.ConfState{Nodes: []uint64{1}})
 	gaction := st.Action()
 	if len(gaction) != 1 {
 		t.Fatalf("len(action) = %d, want 1", len(gaction))
 	}
-	if !reflect.DeepEqual(gaction[0], action{name: "Save"}) {
+	if !reflect.DeepEqual(gaction[0], testutil.Action{Name: "Save"}) {
 		t.Errorf("action = %s, want Save", gaction[0])
 	}
 	gaction = p.Action()
 	if len(gaction) != 2 {
 		t.Fatalf("len(action) = %d, want 2", len(gaction))
 	}
-	if !reflect.DeepEqual(gaction[0], action{name: "Cut"}) {
+	if !reflect.DeepEqual(gaction[0], testutil.Action{Name: "Cut"}) {
 		t.Errorf("action = %s, want Cut", gaction[0])
 	}
-	if !reflect.DeepEqual(gaction[1], action{name: "SaveSnap"}) {
+	if !reflect.DeepEqual(gaction[1], testutil.Action{Name: "SaveSnap"}) {
 		t.Errorf("action = %s, want SaveSnap", gaction[1])
 	}
 }
@@ -722,13 +739,15 @@ func TestTriggerSnap(t *testing.T) {
 	st := &storeRecorder{}
 	p := &storageRecorder{}
 	srv := &EtcdServer{
-		node:        newNodeCommitter(),
-		raftStorage: raft.NewMemoryStorage(),
-		store:       st,
-		transport:   &nopTransporter{},
-		storage:     p,
-		snapCount:   uint64(snapc),
-		reqIDGen:    idutil.NewGenerator(0, time.Time{}),
+		r: raftNode{
+			Node:        newNodeCommitter(),
+			snapCount:   uint64(snapc),
+			raftStorage: raft.NewMemoryStorage(),
+			storage:     p,
+			transport:   &nopTransporter{},
+		},
+		store:    st,
+		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
 	srv.start()
 	for i := 0; i < snapc+1; i++ {
@@ -743,7 +762,7 @@ func TestTriggerSnap(t *testing.T) {
 	if len(gaction) != wcnt {
 		t.Fatalf("len(action) = %d, want %d", len(gaction), wcnt)
 	}
-	if !reflect.DeepEqual(gaction[wcnt-1], action{name: "SaveSnap"}) {
+	if !reflect.DeepEqual(gaction[wcnt-1], testutil.Action{Name: "SaveSnap"}) {
 		t.Errorf("action = %s, want SaveSnap", gaction[wcnt-1])
 	}
 }
@@ -757,12 +776,14 @@ func TestRecvSnapshot(t *testing.T) {
 	cl := newCluster("abc")
 	cl.SetStore(store.New())
 	s := &EtcdServer{
-		store:       st,
-		transport:   &nopTransporter{},
-		storage:     p,
-		node:        n,
-		raftStorage: raft.NewMemoryStorage(),
-		Cluster:     cl,
+		r: raftNode{
+			Node:        n,
+			transport:   &nopTransporter{},
+			storage:     p,
+			raftStorage: raft.NewMemoryStorage(),
+		},
+		store:   st,
+		Cluster: cl,
 	}
 
 	s.start()
@@ -771,11 +792,11 @@ func TestRecvSnapshot(t *testing.T) {
 	testutil.ForceGosched()
 	s.Stop()
 
-	wactions := []action{action{name: "Recovery"}}
+	wactions := []testutil.Action{{Name: "Recovery"}}
 	if g := st.Action(); !reflect.DeepEqual(g, wactions) {
 		t.Errorf("store action = %v, want %v", g, wactions)
 	}
-	wactions = []action{action{name: "SaveSnap"}, action{name: "Save"}}
+	wactions = []testutil.Action{{Name: "SaveSnap"}, {Name: "Save"}}
 	if g := p.Action(); !reflect.DeepEqual(g, wactions) {
 		t.Errorf("storage action = %v, want %v", g, wactions)
 	}
@@ -790,12 +811,14 @@ func TestRecvSlowSnapshot(t *testing.T) {
 	cl := newCluster("abc")
 	cl.SetStore(store.New())
 	s := &EtcdServer{
-		store:       st,
-		transport:   &nopTransporter{},
-		storage:     &storageRecorder{},
-		node:        n,
-		raftStorage: raft.NewMemoryStorage(),
-		Cluster:     cl,
+		r: raftNode{
+			Node:        n,
+			storage:     &storageRecorder{},
+			raftStorage: raft.NewMemoryStorage(),
+			transport:   &nopTransporter{},
+		},
+		store:   st,
+		Cluster: cl,
 	}
 
 	s.start()
@@ -823,12 +846,14 @@ func TestApplySnapshotAndCommittedEntries(t *testing.T) {
 	cl.SetStore(store.New())
 	storage := raft.NewMemoryStorage()
 	s := &EtcdServer{
-		store:       st,
-		transport:   &nopTransporter{},
-		storage:     &storageRecorder{},
-		node:        n,
-		raftStorage: storage,
-		Cluster:     cl,
+		r: raftNode{
+			Node:        n,
+			storage:     &storageRecorder{},
+			raftStorage: storage,
+			transport:   &nopTransporter{},
+		},
+		store:   st,
+		Cluster: cl,
 	}
 
 	s.start()
@@ -847,11 +872,11 @@ func TestApplySnapshotAndCommittedEntries(t *testing.T) {
 	if len(actions) != 2 {
 		t.Fatalf("len(action) = %d, want 2", len(actions))
 	}
-	if actions[0].name != "Recovery" {
-		t.Errorf("actions[0] = %s, want %s", actions[0].name, "Recovery")
+	if actions[0].Name != "Recovery" {
+		t.Errorf("actions[0] = %s, want %s", actions[0].Name, "Recovery")
 	}
-	if actions[1].name != "Get" {
-		t.Errorf("actions[1] = %s, want %s", actions[1].name, "Get")
+	if actions[1].Name != "Get" {
+		t.Errorf("actions[1] = %s, want %s", actions[1].Name, "Get")
 	}
 }
 
@@ -862,15 +887,18 @@ func TestAddMember(t *testing.T) {
 		SoftState: &raft.SoftState{RaftState: raft.StateLeader},
 	}
 	cl := newTestCluster(nil)
-	cl.SetStore(store.New())
+	st := store.New()
+	cl.SetStore(st)
 	s := &EtcdServer{
-		node:        n,
-		raftStorage: raft.NewMemoryStorage(),
-		store:       &storeRecorder{},
-		transport:   &nopTransporter{},
-		storage:     &storageRecorder{},
-		Cluster:     cl,
-		reqIDGen:    idutil.NewGenerator(0, time.Time{}),
+		r: raftNode{
+			Node:        n,
+			raftStorage: raft.NewMemoryStorage(),
+			storage:     &storageRecorder{},
+			transport:   &nopTransporter{},
+		},
+		store:    st,
+		Cluster:  cl,
+		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
 	s.start()
 	m := Member{ID: 1234, RaftAttributes: RaftAttributes{PeerURLs: []string{"foo"}}}
@@ -881,7 +909,7 @@ func TestAddMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddMember error: %v", err)
 	}
-	wactions := []action{action{name: "ProposeConfChange:ConfChangeAddNode"}, action{name: "ApplyConfChange:ConfChangeAddNode"}}
+	wactions := []testutil.Action{{Name: "ProposeConfChange:ConfChangeAddNode"}, {Name: "ApplyConfChange:ConfChangeAddNode"}}
 	if !reflect.DeepEqual(gaction, wactions) {
 		t.Errorf("action = %v, want %v", gaction, wactions)
 	}
@@ -897,16 +925,19 @@ func TestRemoveMember(t *testing.T) {
 		SoftState: &raft.SoftState{RaftState: raft.StateLeader},
 	}
 	cl := newTestCluster(nil)
+	st := store.New()
 	cl.SetStore(store.New())
 	cl.AddMember(&Member{ID: 1234})
 	s := &EtcdServer{
-		node:        n,
-		raftStorage: raft.NewMemoryStorage(),
-		store:       &storeRecorder{},
-		transport:   &nopTransporter{},
-		storage:     &storageRecorder{},
-		Cluster:     cl,
-		reqIDGen:    idutil.NewGenerator(0, time.Time{}),
+		r: raftNode{
+			Node:        n,
+			raftStorage: raft.NewMemoryStorage(),
+			storage:     &storageRecorder{},
+			transport:   &nopTransporter{},
+		},
+		store:    st,
+		Cluster:  cl,
+		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
 	s.start()
 	err := s.RemoveMember(context.TODO(), 1234)
@@ -916,7 +947,7 @@ func TestRemoveMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RemoveMember error: %v", err)
 	}
-	wactions := []action{action{name: "ProposeConfChange:ConfChangeRemoveNode"}, action{name: "ApplyConfChange:ConfChangeRemoveNode"}}
+	wactions := []testutil.Action{{Name: "ProposeConfChange:ConfChangeRemoveNode"}, {Name: "ApplyConfChange:ConfChangeRemoveNode"}}
 	if !reflect.DeepEqual(gaction, wactions) {
 		t.Errorf("action = %v, want %v", gaction, wactions)
 	}
@@ -932,16 +963,19 @@ func TestUpdateMember(t *testing.T) {
 		SoftState: &raft.SoftState{RaftState: raft.StateLeader},
 	}
 	cl := newTestCluster(nil)
-	cl.SetStore(store.New())
+	st := store.New()
+	cl.SetStore(st)
 	cl.AddMember(&Member{ID: 1234})
 	s := &EtcdServer{
-		node:        n,
-		raftStorage: raft.NewMemoryStorage(),
-		store:       &storeRecorder{},
-		transport:   &nopTransporter{},
-		storage:     &storageRecorder{},
-		Cluster:     cl,
-		reqIDGen:    idutil.NewGenerator(0, time.Time{}),
+		r: raftNode{
+			Node:        n,
+			raftStorage: raft.NewMemoryStorage(),
+			storage:     &storageRecorder{},
+			transport:   &nopTransporter{},
+		},
+		store:    st,
+		Cluster:  cl,
+		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
 	s.start()
 	wm := Member{ID: 1234, RaftAttributes: RaftAttributes{PeerURLs: []string{"http://127.0.0.1:1"}}}
@@ -952,7 +986,7 @@ func TestUpdateMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateMember error: %v", err)
 	}
-	wactions := []action{action{name: "ProposeConfChange:ConfChangeUpdateNode"}, action{name: "ApplyConfChange:ConfChangeUpdateNode"}}
+	wactions := []testutil.Action{{Name: "ProposeConfChange:ConfChangeUpdateNode"}, {Name: "ApplyConfChange:ConfChangeUpdateNode"}}
 	if !reflect.DeepEqual(gaction, wactions) {
 		t.Errorf("action = %v, want %v", gaction, wactions)
 	}
@@ -971,9 +1005,9 @@ func TestPublish(t *testing.T) {
 	w := &waitWithResponse{ch: ch}
 	srv := &EtcdServer{
 		id:         1,
+		r:          raftNode{Node: n},
 		attributes: Attributes{Name: "node1", ClientURLs: []string{"http://a", "http://b"}},
 		Cluster:    &Cluster{},
-		node:       n,
 		w:          w,
 		reqIDGen:   idutil.NewGenerator(0, time.Time{}),
 	}
@@ -983,10 +1017,10 @@ func TestPublish(t *testing.T) {
 	if len(action) != 1 {
 		t.Fatalf("len(action) = %d, want 1", len(action))
 	}
-	if action[0].name != "Propose" {
-		t.Fatalf("action = %s, want Propose", action[0].name)
+	if action[0].Name != "Propose" {
+		t.Fatalf("action = %s, want Propose", action[0].Name)
 	}
-	data := action[0].params[0].([]byte)
+	data := action[0].Params[0].([]byte)
 	var r pb.Request
 	if err := r.Unmarshal(data); err != nil {
 		t.Fatalf("unmarshal request error: %v", err)
@@ -1010,13 +1044,15 @@ func TestPublish(t *testing.T) {
 // TestPublishStopped tests that publish will be stopped if server is stopped.
 func TestPublishStopped(t *testing.T) {
 	srv := &EtcdServer{
-		node:      &nodeRecorder{},
-		transport: &nopTransporter{},
-		Cluster:   &Cluster{},
-		w:         &waitRecorder{},
-		done:      make(chan struct{}),
-		stop:      make(chan struct{}),
-		reqIDGen:  idutil.NewGenerator(0, time.Time{}),
+		r: raftNode{
+			Node:      &nodeRecorder{},
+			transport: &nopTransporter{},
+		},
+		Cluster:  &Cluster{},
+		w:        &waitRecorder{},
+		done:     make(chan struct{}),
+		stop:     make(chan struct{}),
+		reqIDGen: idutil.NewGenerator(0, time.Time{}),
 	}
 	close(srv.done)
 	srv.publish(time.Hour)
@@ -1028,7 +1064,7 @@ func TestPublishRetry(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 	n := &nodeRecorder{}
 	srv := &EtcdServer{
-		node:     n,
+		r:        raftNode{Node: n},
 		w:        &waitRecorder{},
 		done:     make(chan struct{}),
 		reqIDGen: idutil.NewGenerator(0, time.Time{}),
@@ -1108,135 +1144,114 @@ func TestGetOtherPeerURLs(t *testing.T) {
 	}
 }
 
-type action struct {
-	name   string
-	params []interface{}
-}
-
-type recorder struct {
-	sync.Mutex
-	actions []action
-}
-
-func (r *recorder) record(a action) {
-	r.Lock()
-	r.actions = append(r.actions, a)
-	r.Unlock()
-}
-func (r *recorder) Action() []action {
-	r.Lock()
-	cpy := make([]action, len(r.actions))
-	copy(cpy, r.actions)
-	r.Unlock()
-	return cpy
-}
-
-type storeRecorder struct {
-	recorder
-}
+// storeRecorder records all the methods it receives.
+// storeRecorder DOES NOT work as a actual store.
+// It always returns invaild empty response and no error.
+type storeRecorder struct{ testutil.Recorder }
 
 func (s *storeRecorder) Version() int  { return 0 }
 func (s *storeRecorder) Index() uint64 { return 0 }
 func (s *storeRecorder) Get(path string, recursive, sorted bool) (*store.Event, error) {
-	s.record(action{
-		name:   "Get",
-		params: []interface{}{path, recursive, sorted},
+	s.Record(testutil.Action{
+		Name:   "Get",
+		Params: []interface{}{path, recursive, sorted},
 	})
 	return &store.Event{}, nil
 }
 func (s *storeRecorder) Set(path string, dir bool, val string, expr time.Time) (*store.Event, error) {
-	s.record(action{
-		name:   "Set",
-		params: []interface{}{path, dir, val, expr},
+	s.Record(testutil.Action{
+		Name:   "Set",
+		Params: []interface{}{path, dir, val, expr},
 	})
 	return &store.Event{}, nil
 }
 func (s *storeRecorder) Update(path, val string, expr time.Time) (*store.Event, error) {
-	s.record(action{
-		name:   "Update",
-		params: []interface{}{path, val, expr},
+	s.Record(testutil.Action{
+		Name:   "Update",
+		Params: []interface{}{path, val, expr},
 	})
 	return &store.Event{}, nil
 }
 func (s *storeRecorder) Create(path string, dir bool, val string, uniq bool, exp time.Time) (*store.Event, error) {
-	s.record(action{
-		name:   "Create",
-		params: []interface{}{path, dir, val, uniq, exp},
+	s.Record(testutil.Action{
+		Name:   "Create",
+		Params: []interface{}{path, dir, val, uniq, exp},
 	})
 	return &store.Event{}, nil
 }
 func (s *storeRecorder) CompareAndSwap(path, prevVal string, prevIdx uint64, val string, expr time.Time) (*store.Event, error) {
-	s.record(action{
-		name:   "CompareAndSwap",
-		params: []interface{}{path, prevVal, prevIdx, val, expr},
+	s.Record(testutil.Action{
+		Name:   "CompareAndSwap",
+		Params: []interface{}{path, prevVal, prevIdx, val, expr},
 	})
 	return &store.Event{}, nil
 }
 func (s *storeRecorder) Delete(path string, dir, recursive bool) (*store.Event, error) {
-	s.record(action{
-		name:   "Delete",
-		params: []interface{}{path, dir, recursive},
+	s.Record(testutil.Action{
+		Name:   "Delete",
+		Params: []interface{}{path, dir, recursive},
 	})
 	return &store.Event{}, nil
 }
 func (s *storeRecorder) CompareAndDelete(path, prevVal string, prevIdx uint64) (*store.Event, error) {
-	s.record(action{
-		name:   "CompareAndDelete",
-		params: []interface{}{path, prevVal, prevIdx},
+	s.Record(testutil.Action{
+		Name:   "CompareAndDelete",
+		Params: []interface{}{path, prevVal, prevIdx},
 	})
 	return &store.Event{}, nil
 }
 func (s *storeRecorder) Watch(_ string, _, _ bool, _ uint64) (store.Watcher, error) {
-	s.record(action{name: "Watch"})
-	return &stubWatcher{}, nil
+	s.Record(testutil.Action{Name: "Watch"})
+	return &nopWatcher{}, nil
 }
 func (s *storeRecorder) Save() ([]byte, error) {
-	s.record(action{name: "Save"})
+	s.Record(testutil.Action{Name: "Save"})
 	return nil, nil
 }
 func (s *storeRecorder) Recovery(b []byte) error {
-	s.record(action{name: "Recovery"})
+	s.Record(testutil.Action{Name: "Recovery"})
 	return nil
 }
 func (s *storeRecorder) JsonStats() []byte { return nil }
 func (s *storeRecorder) DeleteExpiredKeys(cutoff time.Time) {
-	s.record(action{
-		name:   "DeleteExpiredKeys",
-		params: []interface{}{cutoff},
+	s.Record(testutil.Action{
+		Name:   "DeleteExpiredKeys",
+		Params: []interface{}{cutoff},
 	})
 }
 
-type stubWatcher struct{}
+type nopWatcher struct{}
 
-func (w *stubWatcher) EventChan() chan *store.Event { return nil }
-func (w *stubWatcher) StartIndex() uint64           { return 0 }
-func (w *stubWatcher) Remove()                      {}
+func (w *nopWatcher) EventChan() chan *store.Event { return nil }
+func (w *nopWatcher) StartIndex() uint64           { return 0 }
+func (w *nopWatcher) Remove()                      {}
 
-// errStoreRecorder returns an store error on Get, Watch request
+// errStoreRecorder is a storeRecorder, but returns the given error on
+// Get, Watch methods.
 type errStoreRecorder struct {
 	storeRecorder
 	err error
 }
 
-func (s *errStoreRecorder) Get(_ string, _, _ bool) (*store.Event, error) {
-	s.record(action{name: "Get"})
+func (s *errStoreRecorder) Get(path string, recursive, sorted bool) (*store.Event, error) {
+	s.storeRecorder.Get(path, recursive, sorted)
 	return nil, s.err
 }
-func (s *errStoreRecorder) Watch(_ string, _, _ bool, _ uint64) (store.Watcher, error) {
-	s.record(action{name: "Watch"})
+func (s *errStoreRecorder) Watch(path string, recursive, sorted bool, index uint64) (store.Watcher, error) {
+	s.storeRecorder.Watch(path, recursive, sorted, index)
 	return nil, s.err
 }
 
 type waitRecorder struct {
-	action []action
+	action []testutil.Action
 }
 
 func (w *waitRecorder) Register(id uint64) <-chan interface{} {
-	w.action = append(w.action, action{name: "Register"})
+	w.action = append(w.action, testutil.Action{Name: "Register"})
 	return nil
 }
 func (w *waitRecorder) Trigger(id uint64, x interface{}) {
-	w.action = append(w.action, action{name: "Trigger"})
+	w.action = append(w.action, testutil.Action{Name: "Trigger"})
 }
 
 type waitWithResponse struct {
@@ -1248,58 +1263,54 @@ func (w *waitWithResponse) Register(id uint64) <-chan interface{} {
 }
 func (w *waitWithResponse) Trigger(id uint64, x interface{}) {}
 
-type storageRecorder struct {
-	recorder
-}
+type storageRecorder struct{ testutil.Recorder }
 
 func (p *storageRecorder) Save(st raftpb.HardState, ents []raftpb.Entry) error {
-	p.record(action{name: "Save"})
+	p.Record(testutil.Action{Name: "Save"})
 	return nil
 }
 func (p *storageRecorder) Cut() error {
-	p.record(action{name: "Cut"})
+	p.Record(testutil.Action{Name: "Cut"})
 	return nil
 }
 func (p *storageRecorder) SaveSnap(st raftpb.Snapshot) error {
 	if !raft.IsEmptySnap(st) {
-		p.record(action{name: "SaveSnap"})
+		p.Record(testutil.Action{Name: "SaveSnap"})
 	}
 	return nil
 }
 func (p *storageRecorder) Close() error { return nil }
 
-type nodeRecorder struct {
-	recorder
-}
+type nodeRecorder struct{ testutil.Recorder }
 
-func (n *nodeRecorder) Tick() { n.record(action{name: "Tick"}) }
+func (n *nodeRecorder) Tick() { n.Record(testutil.Action{Name: "Tick"}) }
 func (n *nodeRecorder) Campaign(ctx context.Context) error {
-	n.record(action{name: "Campaign"})
+	n.Record(testutil.Action{Name: "Campaign"})
 	return nil
 }
 func (n *nodeRecorder) Propose(ctx context.Context, data []byte) error {
-	n.record(action{name: "Propose", params: []interface{}{data}})
+	n.Record(testutil.Action{Name: "Propose", Params: []interface{}{data}})
 	return nil
 }
 func (n *nodeRecorder) ProposeConfChange(ctx context.Context, conf raftpb.ConfChange) error {
-	n.record(action{name: "ProposeConfChange"})
+	n.Record(testutil.Action{Name: "ProposeConfChange"})
 	return nil
 }
 func (n *nodeRecorder) Step(ctx context.Context, msg raftpb.Message) error {
-	n.record(action{name: "Step"})
+	n.Record(testutil.Action{Name: "Step"})
 	return nil
 }
 func (n *nodeRecorder) Ready() <-chan raft.Ready { return nil }
 func (n *nodeRecorder) Advance()                 {}
 func (n *nodeRecorder) ApplyConfChange(conf raftpb.ConfChange) *raftpb.ConfState {
-	n.record(action{name: "ApplyConfChange", params: []interface{}{conf}})
+	n.Record(testutil.Action{Name: "ApplyConfChange", Params: []interface{}{conf}})
 	return &raftpb.ConfState{}
 }
 func (n *nodeRecorder) Stop() {
-	n.record(action{name: "Stop"})
+	n.Record(testutil.Action{Name: "Stop"})
 }
 func (n *nodeRecorder) Compact(index uint64, nodes []uint64, d []byte) {
-	n.record(action{name: "Compact"})
+	n.Record(testutil.Action{Name: "Compact"})
 }
 
 type nodeProposalBlockerRecorder struct {
@@ -1308,7 +1319,7 @@ type nodeProposalBlockerRecorder struct {
 
 func (n *nodeProposalBlockerRecorder) Propose(ctx context.Context, data []byte) error {
 	<-ctx.Done()
-	n.record(action{name: "Propose blocked"})
+	n.Record(testutil.Action{Name: "Propose blocked"})
 	return nil
 }
 
@@ -1329,14 +1340,14 @@ func (n *nodeConfChangeCommitterRecorder) ProposeConfChange(ctx context.Context,
 	}
 	n.index++
 	n.readyc <- raft.Ready{CommittedEntries: []raftpb.Entry{{Index: n.index, Type: raftpb.EntryConfChange, Data: data}}}
-	n.record(action{name: "ProposeConfChange:" + conf.Type.String()})
+	n.Record(testutil.Action{Name: "ProposeConfChange:" + conf.Type.String()})
 	return nil
 }
 func (n *nodeConfChangeCommitterRecorder) Ready() <-chan raft.Ready {
 	return n.readyc
 }
 func (n *nodeConfChangeCommitterRecorder) ApplyConfChange(conf raftpb.ConfChange) *raftpb.ConfState {
-	n.record(action{name: "ApplyConfChange:" + conf.Type.String()})
+	n.Record(testutil.Action{Name: "ApplyConfChange:" + conf.Type.String()})
 	return &raftpb.ConfState{}
 }
 
@@ -1383,6 +1394,5 @@ func (s *nopTransporter) AddPeer(id types.ID, us []string)    {}
 func (s *nopTransporter) RemovePeer(id types.ID)              {}
 func (s *nopTransporter) UpdatePeer(id types.ID, us []string) {}
 func (s *nopTransporter) Stop()                               {}
-func (s *nopTransporter) ShouldStopNotify() <-chan struct{}   { return nil }
 func (s *nopTransporter) Pause()                              {}
 func (s *nopTransporter) Resume()                             {}

@@ -49,7 +49,7 @@ func NewHandler(r Raft, cid types.ID) http.Handler {
 
 // NewStreamHandler returns a handler which initiates streamer when receiving
 // stream request from follower.
-func NewStreamHandler(tr *Transport, id, cid types.ID) http.Handler {
+func NewStreamHandler(tr *transport, id, cid types.ID) http.Handler {
 	return &streamHandler{
 		tr:  tr,
 		id:  id,
@@ -108,7 +108,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type streamHandler struct {
-	tr  *Transport
+	tr  *transport
 	id  types.ID
 	cid types.ID
 }
@@ -156,17 +156,18 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	w.(http.Flusher).Flush()
-
-	done, err := p.StartStreaming(w.(WriteFlusher), from, term)
+	sw := newStreamWriter(from, term)
+	err = p.attachStream(sw)
 	if err != nil {
-		log.Printf("rafthttp: streaming request ignored due to start streaming error: %v", err)
-		// TODO: consider http status and info here
-		http.Error(w, "error enable streaming", http.StatusInternalServerError)
+		log.Printf("rafthttp: %v", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	<-done
+
+	w.WriteHeader(http.StatusOK)
+	w.(http.Flusher).Flush()
+	go sw.handle(w.(WriteFlusher))
+	<-sw.stopNotify()
 }
 
 type writerToResponse interface {

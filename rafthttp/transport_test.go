@@ -29,10 +29,10 @@ import (
 
 func TestTransportAdd(t *testing.T) {
 	ls := stats.NewLeaderStats("")
-	tr := &Transport{
-		LeaderStats: ls,
+	tr := &transport{
+		leaderStats: ls,
+		peers:       make(map[types.ID]*peer),
 	}
-	tr.Start()
 	tr.AddPeer(1, []string{"http://a"})
 
 	if _, ok := ls.Followers["1"]; !ok {
@@ -52,10 +52,10 @@ func TestTransportAdd(t *testing.T) {
 }
 
 func TestTransportRemove(t *testing.T) {
-	tr := &Transport{
-		LeaderStats: stats.NewLeaderStats(""),
+	tr := &transport{
+		leaderStats: stats.NewLeaderStats(""),
+		peers:       make(map[types.ID]*peer),
 	}
-	tr.Start()
 	tr.AddPeer(1, []string{"http://a"})
 	tr.RemovePeer(types.ID(1))
 
@@ -64,26 +64,27 @@ func TestTransportRemove(t *testing.T) {
 	}
 }
 
-func TestTransportShouldStop(t *testing.T) {
-	tr := &Transport{
-		RoundTripper: newRespRoundTripper(http.StatusForbidden, nil),
-		LeaderStats:  stats.NewLeaderStats(""),
+func TestTransportErrorc(t *testing.T) {
+	errorc := make(chan error, 1)
+	tr := &transport{
+		roundTripper: newRespRoundTripper(http.StatusForbidden, nil),
+		leaderStats:  stats.NewLeaderStats(""),
+		peers:        make(map[types.ID]*peer),
+		errorc:       errorc,
 	}
-	tr.Start()
 	tr.AddPeer(1, []string{"http://a"})
 
-	shouldstop := tr.ShouldStopNotify()
 	select {
-	case <-shouldstop:
-		t.Fatalf("received unexpected shouldstop notification")
+	case <-errorc:
+		t.Fatalf("received unexpected from errorc")
 	case <-time.After(10 * time.Millisecond):
 	}
 	tr.peers[1].Send(raftpb.Message{})
 
 	testutil.ForceGosched()
 	select {
-	case <-shouldstop:
+	case <-errorc:
 	default:
-		t.Fatalf("cannot receive stop notification")
+		t.Fatalf("cannot receive error from errorc")
 	}
 }

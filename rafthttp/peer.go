@@ -18,6 +18,7 @@ package rafthttp
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -45,7 +46,37 @@ const (
 	ConnWriteTimeout = 5 * time.Second
 )
 
-func NewPeer(tr http.RoundTripper, u string, id types.ID, cid types.ID, r Raft, fs *stats.FollowerStats, shouldstop chan struct{}) *peer {
+type peer struct {
+	sync.Mutex
+
+	id  types.ID
+	cid types.ID
+
+	tr     http.RoundTripper
+	r      Raft
+	fs     *stats.FollowerStats
+	errorc chan error
+
+	batcher     *Batcher
+	propBatcher *ProposalBatcher
+	q           chan *raftpb.Message
+
+	stream *stream
+
+	// wait for the handling routines
+	wg sync.WaitGroup
+
+	// the url this sender post to
+	u string
+	// if the last send was successful, the sender is active.
+	// Or it is inactive
+	active  bool
+	errored error
+	paused  bool
+	stopped bool
+}
+
+func NewPeer(tr http.RoundTripper, u string, id types.ID, cid types.ID, r Raft, fs *stats.FollowerStats, errorc chan error) *peer {
 	p := &peer{
 		id:          id,
 		active:      true,
@@ -54,7 +85,8 @@ func NewPeer(tr http.RoundTripper, u string, id types.ID, cid types.ID, r Raft, 
 		cid:         cid,
 		r:           r,
 		fs:          fs,
-		shouldstop:  shouldstop,
+		stream:      &stream{},
+		errorc:      errorc,
 		batcher:     NewBatcher(100, appRespBatchMs*time.Millisecond),
 		propBatcher: NewProposalBatcher(100, propBatchMs*time.Millisecond),
 		q:           make(chan *raftpb.Message, senderBufSize),
@@ -66,56 +98,13 @@ func NewPeer(tr http.RoundTripper, u string, id types.ID, cid types.ID, r Raft, 
 	return p
 }
 
-type peer struct {
-	id  types.ID
-	cid types.ID
-
-	tr         http.RoundTripper
-	r          Raft
-	fs         *stats.FollowerStats
-	shouldstop chan struct{}
-
-	strmCln     *streamClient
-	batcher     *Batcher
-	propBatcher *ProposalBatcher
-	q           chan *raftpb.Message
-
-	strmSrvMu sync.Mutex
-	strmSrv   *streamServer
-
-	// wait for the handling routines
-	wg sync.WaitGroup
-
-	mu sync.RWMutex
-	u  string // the url this sender post to
-	// if the last send was successful, thi sender is active.
-	// Or it is inactive
-	active  bool
-	errored error
-	paused  bool
-}
-
-// StartStreaming enables streaming in the peer using the given writer,
-// which provides a fast and efficient way to send appendEntry messages.
-func (p *peer) StartStreaming(w WriteFlusher, to types.ID, term uint64) (<-chan struct{}, error) {
-	p.strmSrvMu.Lock()
-	defer p.strmSrvMu.Unlock()
-	if p.strmSrv != nil {
-		// ignore lower-term streaming request
-		if term < p.strmSrv.term {
-			return nil, fmt.Errorf("out of data streaming request: term %d, request term %d", term, p.strmSrv.term)
-		}
-		// stop the existing one
-		p.strmSrv.stop()
-		p.strmSrv = nil
-	}
-	p.strmSrv = startStreamServer(w, to, term, p.fs)
-	return p.strmSrv.stopNotify(), nil
-}
-
 func (p *peer) Update(u string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.Lock()
+	defer p.Unlock()
+	if p.stopped {
+		// TODO: not panic here?
+		panic("peer: update a stopped peer")
+	}
 	p.u = u
 }
 
@@ -123,16 +112,21 @@ func (p *peer) Update(u string) {
 // It may be fail to send data if it returns nil error.
 // TODO (xiangli): reasonable retry logic
 func (p *peer) Send(m raftpb.Message) error {
-	p.mu.RLock()
-	pause := p.paused
-	p.mu.RUnlock()
-	if pause {
+	p.Lock()
+	defer p.Unlock()
+	if p.stopped {
+		return errors.New("peer: stopped")
+	}
+	if p.paused {
 		return nil
 	}
 
-	p.maybeStopStream(m.Term)
-	if shouldInitStream(m) && !p.hasStreamClient() {
-		p.initStream(types.ID(m.From), types.ID(m.To), m.Term)
+	// move all the stream related stuff into stream
+	p.stream.invalidate(m.Term)
+	if shouldInitStream(m) && !p.stream.isOpen() {
+		u := p.u
+		// todo: steam open should not block.
+		p.stream.open(types.ID(m.From), p.id, p.cid, m.Term, p.tr, u, p.r)
 		p.batcher.Reset(time.Now())
 	}
 
@@ -140,12 +134,12 @@ func (p *peer) Send(m raftpb.Message) error {
 	switch {
 	case isProposal(m):
 		p.propBatcher.Batch(m)
-	case canBatch(m) && p.hasStreamClient():
+	case canBatch(m) && p.stream.isOpen():
 		if !p.batcher.ShouldBatch(time.Now()) {
 			err = p.send(m)
 		}
 	case canUseStream(m):
-		if ok := p.tryStream(m); !ok {
+		if ok := p.stream.write(m); !ok {
 			err = p.send(m)
 		}
 	default:
@@ -183,74 +177,11 @@ func (p *peer) send(m raftpb.Message) error {
 func (p *peer) Stop() {
 	close(p.q)
 	p.wg.Wait()
-	p.strmSrvMu.Lock()
-	if p.strmSrv != nil {
-		p.strmSrv.stop()
-		p.strmSrv = nil
-	}
-	p.strmSrvMu.Unlock()
-	if p.strmCln != nil {
-		p.strmCln.stop()
-	}
-}
 
-// Pause pauses the peer. The peer will simply drops all incoming
-// messages without retruning an error.
-func (p *peer) Pause() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.paused = true
-}
-
-// Resume resumes a paused peer.
-func (p *peer) Resume() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.paused = false
-}
-
-func (p *peer) maybeStopStream(term uint64) {
-	if p.strmCln != nil && term > p.strmCln.term {
-		p.strmCln.stop()
-		p.strmCln = nil
-	}
-	p.strmSrvMu.Lock()
-	defer p.strmSrvMu.Unlock()
-	if p.strmSrv != nil && term > p.strmSrv.term {
-		p.strmSrv.stop()
-		p.strmSrv = nil
-	}
-}
-
-func (p *peer) hasStreamClient() bool {
-	return p.strmCln != nil && !p.strmCln.isStopped()
-}
-
-func (p *peer) initStream(from, to types.ID, term uint64) {
-	strmCln := newStreamClient(from, to, term, p.r)
-	p.mu.Lock()
-	u := p.u
-	p.mu.Unlock()
-	if err := strmCln.start(p.tr, u, p.cid); err != nil {
-		log.Printf("rafthttp: start stream client error: %v", err)
-		return
-	}
-	p.strmCln = strmCln
-}
-
-func (p *peer) tryStream(m raftpb.Message) bool {
-	p.strmSrvMu.Lock()
-	defer p.strmSrvMu.Unlock()
-	if p.strmSrv == nil || m.Term != p.strmSrv.term {
-		return false
-	}
-	if err := p.strmSrv.send(m.Entries); err != nil {
-		log.Printf("rafthttp: send stream message error: %v", err)
-		p.strmSrv.stop()
-		p.strmSrv = nil
-		return false
-	}
-	return true
+	p.Lock()
+	defer p.Unlock()
+	p.stream.stop()
+	p.stopped = true
 }
 
 func (p *peer) handle() {
@@ -260,7 +191,7 @@ func (p *peer) handle() {
 		err := p.post(pbutil.MustMarshal(m))
 		end := time.Now()
 
-		p.mu.Lock()
+		p.Lock()
 		if err != nil {
 			if p.errored == nil || p.errored.Error() != err.Error() {
 				log.Printf("sender: error posting to %s: %v", p.id, err)
@@ -283,16 +214,16 @@ func (p *peer) handle() {
 				p.fs.Succ(end.Sub(start))
 			}
 		}
-		p.mu.Unlock()
+		p.Unlock()
 	}
 }
 
 // post POSTs a data payload to a url. Returns nil if the POST succeeds,
 // error on any failure.
 func (p *peer) post(data []byte) error {
-	p.mu.RLock()
+	p.Lock()
 	req, err := http.NewRequest("POST", p.u, bytes.NewBuffer(data))
-	p.mu.RUnlock()
+	p.Unlock()
 	if err != nil {
 		return err
 	}
@@ -306,25 +237,51 @@ func (p *peer) post(data []byte) error {
 
 	switch resp.StatusCode {
 	case http.StatusPreconditionFailed:
+		err := fmt.Errorf("conflicting cluster ID with the target cluster (%s != %s)", resp.Header.Get("X-Etcd-Cluster-ID"), p.cid)
 		select {
-		case p.shouldstop <- struct{}{}:
+		case p.errorc <- err:
 		default:
 		}
-		log.Printf("rafthttp: conflicting cluster ID with the target cluster (%s != %s)", resp.Header.Get("X-Etcd-Cluster-ID"), p.cid)
 		return nil
 	case http.StatusForbidden:
+		err := fmt.Errorf("the member has been permanently removed from the cluster")
 		select {
-		case p.shouldstop <- struct{}{}:
+		case p.errorc <- err:
 		default:
 		}
-		log.Println("rafthttp: this member has been permanently removed from the cluster")
-		log.Println("rafthttp: the data-dir used by this member must be removed so that this host can be re-added with a new member ID")
 		return nil
 	case http.StatusNoContent:
 		return nil
 	default:
 		return fmt.Errorf("unexpected http status %s while posting to %q", http.StatusText(resp.StatusCode), req.URL.String())
 	}
+}
+
+// attachStream attaches a streamSever to the peer.
+func (p *peer) attachStream(sw *streamWriter) error {
+	p.Lock()
+	defer p.Unlock()
+	if p.stopped {
+		return errors.New("peer: stopped")
+	}
+
+	sw.fs = p.fs
+	return p.stream.attach(sw)
+}
+
+// Pause pauses the peer. The peer will simply drops all incoming
+// messages without retruning an error.
+func (p *peer) Pause() {
+	p.Lock()
+	defer p.Unlock()
+	p.paused = true
+}
+
+// Resume resumes a paused peer.
+func (p *peer) Resume() {
+	p.Lock()
+	defer p.Unlock()
+	p.paused = false
 }
 
 func isProposal(m raftpb.Message) bool { return m.Type == raftpb.MsgProp }

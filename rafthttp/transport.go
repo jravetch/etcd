@@ -14,10 +14,6 @@ import (
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 )
 
-const (
-	raftPrefix = "/raft"
-)
-
 type Raft interface {
 	Process(ctx context.Context, m raftpb.Message) error
 }
@@ -29,43 +25,50 @@ type Transporter interface {
 	RemovePeer(id types.ID)
 	UpdatePeer(id types.ID, urls []string)
 	Stop()
-	ShouldStopNotify() <-chan struct{}
 }
 
-type Transport struct {
-	RoundTripper http.RoundTripper
-	ID           types.ID
-	ClusterID    types.ID
-	Raft         Raft
-	ServerStats  *stats.ServerStats
-	LeaderStats  *stats.LeaderStats
+type transport struct {
+	roundTripper http.RoundTripper
+	id           types.ID
+	clusterID    types.ID
+	raft         Raft
+	serverStats  *stats.ServerStats
+	leaderStats  *stats.LeaderStats
 
-	mu         sync.RWMutex       // protect the peer map
-	peers      map[types.ID]*peer // remote peers
-	shouldstop chan struct{}
+	mu     sync.RWMutex       // protect the peer map
+	peers  map[types.ID]*peer // remote peers
+	errorc chan error
 }
 
-func (t *Transport) Start() {
-	t.peers = make(map[types.ID]*peer)
-	t.shouldstop = make(chan struct{}, 1)
+func NewTransporter(rt http.RoundTripper, id, cid types.ID, r Raft, errorc chan error, ss *stats.ServerStats, ls *stats.LeaderStats) Transporter {
+	return &transport{
+		roundTripper: rt,
+		id:           id,
+		clusterID:    cid,
+		raft:         r,
+		serverStats:  ss,
+		leaderStats:  ls,
+		peers:        make(map[types.ID]*peer),
+		errorc:       errorc,
+	}
 }
 
-func (t *Transport) Handler() http.Handler {
-	h := NewHandler(t.Raft, t.ClusterID)
-	sh := NewStreamHandler(t, t.ID, t.ClusterID)
+func (t *transport) Handler() http.Handler {
+	h := NewHandler(t.raft, t.clusterID)
+	sh := NewStreamHandler(t, t.id, t.clusterID)
 	mux := http.NewServeMux()
 	mux.Handle(RaftPrefix, h)
 	mux.Handle(RaftStreamPrefix+"/", sh)
 	return mux
 }
 
-func (t *Transport) Peer(id types.ID) *peer {
+func (t *transport) Peer(id types.ID) *peer {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.peers[id]
 }
 
-func (t *Transport) Send(msgs []raftpb.Message) {
+func (t *transport) Send(msgs []raftpb.Message) {
 	for _, m := range msgs {
 		// intentionally dropped message
 		if m.To == 0 {
@@ -79,27 +82,23 @@ func (t *Transport) Send(msgs []raftpb.Message) {
 		}
 
 		if m.Type == raftpb.MsgApp {
-			t.ServerStats.SendAppendReq(m.Size())
+			t.serverStats.SendAppendReq(m.Size())
 		}
 
 		p.Send(m)
 	}
 }
 
-func (t *Transport) Stop() {
+func (t *transport) Stop() {
 	for _, p := range t.peers {
 		p.Stop()
 	}
-	if tr, ok := t.RoundTripper.(*http.Transport); ok {
+	if tr, ok := t.roundTripper.(*http.Transport); ok {
 		tr.CloseIdleConnections()
 	}
 }
 
-func (t *Transport) ShouldStopNotify() <-chan struct{} {
-	return t.shouldstop
-}
-
-func (t *Transport) AddPeer(id types.ID, urls []string) {
+func (t *transport) AddPeer(id types.ID, urls []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, ok := t.peers[id]; ok {
@@ -111,20 +110,19 @@ func (t *Transport) AddPeer(id types.ID, urls []string) {
 	if err != nil {
 		log.Panicf("unexpect peer url %s", peerURL)
 	}
-	u.Path = path.Join(u.Path, raftPrefix)
-	fs := t.LeaderStats.Follower(id.String())
-	t.peers[id] = NewPeer(t.RoundTripper, u.String(), id, t.ClusterID,
-		t.Raft, fs, t.shouldstop)
+	u.Path = path.Join(u.Path, RaftPrefix)
+	fs := t.leaderStats.Follower(id.String())
+	t.peers[id] = NewPeer(t.roundTripper, u.String(), id, t.clusterID, t.raft, fs, t.errorc)
 }
 
-func (t *Transport) RemovePeer(id types.ID) {
+func (t *transport) RemovePeer(id types.ID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.peers[id].Stop()
 	delete(t.peers, id)
 }
 
-func (t *Transport) UpdatePeer(id types.ID, urls []string) {
+func (t *transport) UpdatePeer(id types.ID, urls []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// TODO: return error or just panic?
@@ -136,18 +134,23 @@ func (t *Transport) UpdatePeer(id types.ID, urls []string) {
 	if err != nil {
 		log.Panicf("unexpect peer url %s", peerURL)
 	}
-	u.Path = path.Join(u.Path, raftPrefix)
+	u.Path = path.Join(u.Path, RaftPrefix)
 	t.peers[id].Update(u.String())
 }
 
+type Pausable interface {
+	Pause()
+	Resume()
+}
+
 // for testing
-func (t *Transport) Pause() {
+func (t *transport) Pause() {
 	for _, p := range t.peers {
 		p.Pause()
 	}
 }
 
-func (t *Transport) Resume() {
+func (t *transport) Resume() {
 	for _, p := range t.peers {
 		p.Resume()
 	}
