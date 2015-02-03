@@ -1,27 +1,29 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package etcdmain
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"path"
+	"reflect"
 	"strings"
 	"time"
 
@@ -86,10 +88,11 @@ func startEtcd(cfg *config) (<-chan struct{}, error) {
 		cfg.dir = fmt.Sprintf("%v.etcd", cfg.name)
 		log.Printf("no data-dir provided, using default data-dir ./%s", cfg.dir)
 	}
-	if err := os.MkdirAll(cfg.dir, privateDirMode); err != nil {
-		return nil, fmt.Errorf("cannot create data directory: %v", err)
+	if err := makeMemberDir(cfg.dir); err != nil {
+		return nil, fmt.Errorf("cannot use /member sub-directory: %v", err)
 	}
-	if err := fileutil.IsDirWriteable(cfg.dir); err != nil {
+	membdir := path.Join(cfg.dir, "member")
+	if err := fileutil.IsDirWriteable(membdir); err != nil {
 		return nil, fmt.Errorf("cannot write to data directory: %v", err)
 	}
 
@@ -146,7 +149,7 @@ func startEtcd(cfg *config) (<-chan struct{}, error) {
 		Name:            cfg.name,
 		ClientURLs:      cfg.acurls,
 		PeerURLs:        cfg.apurls,
-		DataDir:         cfg.dir,
+		DataDir:         membdir,
 		SnapCount:       cfg.snapCount,
 		MaxSnapFiles:    cfg.maxSnapFiles,
 		MaxWALFiles:     cfg.maxWalFiles,
@@ -213,15 +216,76 @@ func startProxy(cfg *config) error {
 		return err
 	}
 
-	// TODO(jonboulle): update peerURLs dynamically (i.e. when updating
-	// clientURLs) instead of just using the initial fixed list here
-	peerURLs := cls.PeerURLs()
+	tr, err := transport.NewTransport(cfg.peerTLSInfo)
+	if err != nil {
+		return err
+	}
+
+	if cfg.dir == "" {
+		cfg.dir = fmt.Sprintf("%v.etcd", cfg.name)
+		log.Printf("no proxy data-dir provided, using default proxy data-dir ./%s", cfg.dir)
+	}
+	cfg.dir = path.Join(cfg.dir, "proxy")
+	err = os.MkdirAll(cfg.dir, 0700)
+	if err != nil {
+		return err
+	}
+
+	var peerURLs []string
+	clusterfile := path.Join(cfg.dir, "cluster")
+
+	b, err := ioutil.ReadFile(clusterfile)
+	switch {
+	case err == nil:
+		urls := struct{ PeerURLs []string }{}
+		err := json.Unmarshal(b, &urls)
+		if err != nil {
+			return err
+		}
+		peerURLs = urls.PeerURLs
+		log.Printf("proxy: using peer urls %v from cluster file ./%s", peerURLs, clusterfile)
+	case os.IsNotExist(err):
+		peerURLs = cls.PeerURLs()
+		log.Printf("proxy: using peer urls %v ", peerURLs)
+	default:
+		return err
+	}
+
 	uf := func() []string {
-		cls, err := etcdserver.GetClusterFromPeers(peerURLs)
+		gcls, err := etcdserver.GetClusterFromPeers(peerURLs, tr)
+		// TODO: remove the 2nd check when we fix GetClusterFromPeers
+		// GetClusterFromPeers should not return nil error with an invaild empty cluster
 		if err != nil {
 			log.Printf("proxy: %v", err)
 			return []string{}
 		}
+		if len(gcls.Members()) == 0 {
+			return cls.ClientURLs()
+		}
+		cls = gcls
+
+		urls := struct{ PeerURLs []string }{cls.PeerURLs()}
+		b, err := json.Marshal(urls)
+		if err != nil {
+			log.Printf("proxy: error on marshal peer urls %s", err)
+			return cls.ClientURLs()
+		}
+
+		err = ioutil.WriteFile(clusterfile+".bak", b, 0600)
+		if err != nil {
+			log.Printf("proxy: error on writing urls %s", err)
+			return cls.ClientURLs()
+		}
+		err = os.Rename(clusterfile+".bak", clusterfile)
+		if err != nil {
+			log.Printf("proxy: error on updating clusterfile %s", err)
+			return cls.ClientURLs()
+		}
+		if !reflect.DeepEqual(cls.PeerURLs(), peerURLs) {
+			log.Printf("proxy: updated peer urls in cluster file from %v to %v", peerURLs, cls.PeerURLs())
+		}
+		peerURLs = cls.PeerURLs()
+
 		return cls.ClientURLs()
 	}
 	ph := proxy.NewHandler(pt, uf)
@@ -270,6 +334,42 @@ func setupCluster(cfg *config) (*etcdserver.Cluster, error) {
 		cls, err = etcdserver.NewClusterFromString(cfg.initialClusterToken, cfg.initialCluster)
 	}
 	return cls, err
+}
+
+func makeMemberDir(dir string) error {
+	membdir := path.Join(dir, "member")
+	_, err := os.Stat(membdir)
+	switch {
+	case err == nil:
+		return nil
+	case !os.IsNotExist(err):
+		return err
+	}
+	if err := os.MkdirAll(membdir, 0700); err != nil {
+		return err
+	}
+	v1Files := types.NewUnsafeSet("conf", "log", "snapshot")
+	v2Files := types.NewUnsafeSet("wal", "snap")
+	names, err := fileutil.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		switch {
+		case v1Files.Contains(name):
+			// Link it to the subdir and keep the v1 file at the original
+			// location, so v0.4 etcd can still bootstrap if the upgrade
+			// failed.
+			if err := os.Link(path.Join(dir, name), path.Join(membdir, name)); err != nil {
+				return err
+			}
+		case v2Files.Contains(name):
+			if err := os.Rename(path.Join(dir, name), path.Join(membdir, name)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func genClusterString(name string, urls types.URLs) string {

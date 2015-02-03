@@ -55,6 +55,10 @@ It is recommended to have an odd number of members in a cluster. Having an odd c
 
 As you can see, adding another member to bring the size of cluster up to an odd size is always worth it. During a network partition, an odd number of members also guarantees that there will almost always be a majority of the cluster that can continue to operate and be the source of truth when the partition ends.
 
+#### Changing Cluster Size
+
+After your cluster is up and running, adding or removing members is done via [runtime reconfiguration](runtime-configuration.md), which allows the cluster to be modified without downtime. The `etcdctl` tool has a `member list`, `member add` and `member remove` commands to complete this process.
+
 ### Member Migration
 
 When there is a scheduled machine maintenance or retirement, you might want to migrate an etcd member to another machine without losing the data and changing the member ID. 
@@ -185,20 +189,21 @@ etcd sets different timeouts for various types of client requests. The timeout v
 
 #### Get requests
 
-No timeout is set for get requests, because etcd can always return the result in a short time.
+Timeout is not set for get requests, because etcd serves the result locally in a non-blocking way.
+
+**Note**: QuorumGet request is a different type, which is mentioned in the following sections.
 
 #### Watch requests
 
-Unlimited timeout is set for watch requests. Clients can keep long-polling watch requests as long as they want.
+Timeout is not set for watch requests. etcd will not stop a watch request until client cancels it, or the connection is broken.
 
 #### Delete, Put, Post, QuorumGet requests
 
-The default timeout is large enough to allow all key modifications in a healthy cluster, even when it is electing a new leader.
+The default timeout is 5 seconds. It should be large enough to allow all key modifications if the majority of cluster is functioning.
 
-If the request times out, it indicates three possibilities:
+If the request times out, it indicates two possibilities:
 
-1. the request is lost when switching leader, which occurs occasionally
-2. the request is sent to a network-isolated member
-3. the cluster is unhealthy, or even out-of-work
+1. the server the request sent to was not functioning at that time.
+2. the majority of the cluster is not functioning.
 
-If case 2 or 3 happens, administrators should resolve it as soon as possible.
+If timeout happens several times continuously, administrators should check status of cluster and resolve it as soon as possible.

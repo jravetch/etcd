@@ -1,18 +1,16 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package raft
 
@@ -52,61 +50,61 @@ func (st StateType) String() string {
 	return stmap[uint64(st)]
 }
 
-type progress struct {
-	match, next uint64
-	wait        int
+type Progress struct {
+	Match, Next uint64
+	Wait        int
 }
 
-func (pr *progress) update(n uint64) {
+func (pr *Progress) update(n uint64) {
 	pr.waitReset()
-	if pr.match < n {
-		pr.match = n
+	if pr.Match < n {
+		pr.Match = n
 	}
-	if pr.next < n+1 {
-		pr.next = n + 1
+	if pr.Next < n+1 {
+		pr.Next = n + 1
 	}
 }
 
-func (pr *progress) optimisticUpdate(n uint64) { pr.next = n + 1 }
+func (pr *Progress) optimisticUpdate(n uint64) { pr.Next = n + 1 }
 
 // maybeDecrTo returns false if the given to index comes from an out of order message.
 // Otherwise it decreases the progress next index to min(rejected, last) and returns true.
-func (pr *progress) maybeDecrTo(rejected, last uint64) bool {
+func (pr *Progress) maybeDecrTo(rejected, last uint64) bool {
 	pr.waitReset()
-	if pr.match != 0 {
+	if pr.Match != 0 {
 		// the rejection must be stale if the progress has matched and "rejected"
 		// is smaller than "match".
-		if rejected <= pr.match {
+		if rejected <= pr.Match {
 			return false
 		}
 		// directly decrease next to match + 1
-		pr.next = pr.match + 1
+		pr.Next = pr.Match + 1
 		return true
 	}
 
 	// the rejection must be stale if "rejected" does not match next - 1
-	if pr.next-1 != rejected {
+	if pr.Next-1 != rejected {
 		return false
 	}
 
-	if pr.next = min(rejected, last+1); pr.next < 1 {
-		pr.next = 1
+	if pr.Next = min(rejected, last+1); pr.Next < 1 {
+		pr.Next = 1
 	}
 	return true
 }
 
-func (pr *progress) waitDecr(i int) {
-	pr.wait -= i
-	if pr.wait < 0 {
-		pr.wait = 0
+func (pr *Progress) waitDecr(i int) {
+	pr.Wait -= i
+	if pr.Wait < 0 {
+		pr.Wait = 0
 	}
 }
-func (pr *progress) waitSet(w int)    { pr.wait = w }
-func (pr *progress) waitReset()       { pr.wait = 0 }
-func (pr *progress) shouldWait() bool { return pr.match == 0 && pr.wait > 0 }
+func (pr *Progress) waitSet(w int)    { pr.Wait = w }
+func (pr *Progress) waitReset()       { pr.Wait = 0 }
+func (pr *Progress) shouldWait() bool { return pr.Match == 0 && pr.Wait > 0 }
 
-func (pr *progress) String() string {
-	return fmt.Sprintf("next = %d, match = %d, wait = %v", pr.next, pr.match, pr.wait)
+func (pr *Progress) String() string {
+	return fmt.Sprintf("next = %d, match = %d, wait = %v", pr.Next, pr.Match, pr.Wait)
 }
 
 type raft struct {
@@ -117,7 +115,7 @@ type raft struct {
 	// the log
 	raftLog *raftLog
 
-	prs map[uint64]*progress
+	prs map[uint64]*Progress
 
 	state StateType
 
@@ -139,7 +137,8 @@ type raft struct {
 	step             stepFunc
 }
 
-func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage) *raft {
+func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage,
+	applied uint64) *raft {
 	if id == None {
 		panic("cannot use none id")
 	}
@@ -161,16 +160,19 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage
 		id:               id,
 		lead:             None,
 		raftLog:          raftlog,
-		prs:              make(map[uint64]*progress),
+		prs:              make(map[uint64]*Progress),
 		electionTimeout:  election,
 		heartbeatTimeout: heartbeat,
 	}
 	r.rand = rand.New(rand.NewSource(int64(id)))
 	for _, p := range peers {
-		r.prs[p] = &progress{next: 1}
+		r.prs[p] = &Progress{Next: 1}
 	}
 	if !isHardStateEqual(hs, emptyState) {
 		r.loadState(hs)
+	}
+	if applied > 0 {
+		raftlog.appliedTo(applied)
 	}
 	r.becomeFollower(r.Term, None)
 
@@ -179,8 +181,8 @@ func newRaft(id uint64, peers []uint64, election, heartbeat int, storage Storage
 		nodesStrs = append(nodesStrs, fmt.Sprintf("%x", n))
 	}
 
-	log.Printf("raft: newRaft %x [peers: [%s], term: %d, commit: %d, lastindex: %d, lastterm: %d]",
-		r.id, strings.Join(nodesStrs, ","), r.Term, r.raftLog.committed, r.raftLog.lastIndex(), r.raftLog.lastTerm())
+	log.Printf("raft: newRaft %x [peers: [%s], term: %d, commit: %d, applied: %d, lastindex: %d, lastterm: %d]",
+		r.id, strings.Join(nodesStrs, ","), r.Term, r.raftLog.committed, r.raftLog.applied, r.raftLog.lastIndex(), r.raftLog.lastTerm())
 	return r
 }
 
@@ -215,12 +217,11 @@ func (r *raft) send(m pb.Message) {
 func (r *raft) sendAppend(to uint64) {
 	pr := r.prs[to]
 	if pr.shouldWait() {
-		log.Printf("raft: %x ignored sending %s to %x [%s]", r.id, pb.MsgApp, to, pr)
 		return
 	}
 	m := pb.Message{}
 	m.To = to
-	if r.needSnapshot(pr.next) {
+	if r.needSnapshot(pr.Next) {
 		m.Type = pb.MsgSnap
 		snapshot, err := r.raftLog.snapshot()
 		if err != nil {
@@ -236,15 +237,15 @@ func (r *raft) sendAppend(to uint64) {
 		pr.waitSet(r.electionTimeout)
 	} else {
 		m.Type = pb.MsgApp
-		m.Index = pr.next - 1
-		m.LogTerm = r.raftLog.term(pr.next - 1)
-		m.Entries = r.raftLog.entries(pr.next)
+		m.Index = pr.Next - 1
+		m.LogTerm = r.raftLog.term(pr.Next - 1)
+		m.Entries = r.raftLog.entries(pr.Next)
 		m.Commit = r.raftLog.committed
 		// optimistically increase the next if the follower
 		// has been matched.
-		if n := len(m.Entries); pr.match != 0 && n != 0 {
+		if n := len(m.Entries); pr.Match != 0 && n != 0 {
 			pr.optimisticUpdate(m.Entries[n-1].Index)
-		} else if pr.match == 0 {
+		} else if pr.Match == 0 {
 			// TODO (xiangli): better way to find out if the follower is in good path or not
 			// a follower might be in bad path even if match != 0, since we optimistically
 			// increase the next.
@@ -262,7 +263,7 @@ func (r *raft) sendHeartbeat(to uint64) {
 	// or it might not have all the committed entries.
 	// The leader MUST NOT forward the follower's commit to
 	// an unmatched index.
-	commit := min(r.prs[to].match, r.raftLog.committed)
+	commit := min(r.prs[to].Match, r.raftLog.committed)
 	m := pb.Message{
 		To:     to,
 		Type:   pb.MsgHeartbeat,
@@ -297,7 +298,7 @@ func (r *raft) maybeCommit() bool {
 	// TODO(bmizerany): optimize.. Currently naive
 	mis := make(uint64Slice, 0, len(r.prs))
 	for i := range r.prs {
-		mis = append(mis, r.prs[i].match)
+		mis = append(mis, r.prs[i].Match)
 	}
 	sort.Sort(sort.Reverse(mis))
 	mci := mis[r.q()-1]
@@ -311,9 +312,9 @@ func (r *raft) reset(term uint64) {
 	r.elapsed = 0
 	r.votes = make(map[uint64]bool)
 	for i := range r.prs {
-		r.prs[i] = &progress{next: r.raftLog.lastIndex() + 1}
+		r.prs[i] = &Progress{Next: r.raftLog.lastIndex() + 1}
 		if i == r.id {
-			r.prs[i].match = r.raftLog.lastIndex()
+			r.prs[i].Match = r.raftLog.lastIndex()
 		}
 	}
 	r.pendingConf = false
@@ -489,13 +490,18 @@ func stepLeader(r *raft, m pb.Message) {
 				r.sendAppend(m.From)
 			}
 		} else {
+			oldWait := r.prs[m.From].shouldWait()
 			r.prs[m.From].update(m.Index)
 			if r.maybeCommit() {
 				r.bcastAppend()
+			} else if oldWait {
+				// update() reset the wait state on this node. If we had delayed sending
+				// an update before, send it now.
+				r.sendAppend(m.From)
 			}
 		}
 	case pb.MsgHeartbeatResp:
-		if r.prs[m.From].match < r.raftLog.lastIndex() {
+		if r.prs[m.From].Match < r.raftLog.lastIndex() {
 			r.sendAppend(m.From)
 		}
 	case pb.MsgVote:
@@ -616,7 +622,7 @@ func (r *raft) restore(s pb.Snapshot) bool {
 		r.id, r.Commit, r.raftLog.lastIndex(), r.raftLog.lastTerm(), s.Metadata.Index, s.Metadata.Term)
 
 	r.raftLog.restore(s)
-	r.prs = make(map[uint64]*progress)
+	r.prs = make(map[uint64]*Progress)
 	for _, n := range s.Metadata.ConfState.Nodes {
 		match, next := uint64(0), uint64(r.raftLog.lastIndex())+1
 		if n == r.id {
@@ -660,7 +666,7 @@ func (r *raft) removeNode(id uint64) {
 func (r *raft) resetPendingConf() { r.pendingConf = false }
 
 func (r *raft) setProgress(id, match, next uint64) {
-	r.prs[id] = &progress{next: next, match: match}
+	r.prs[id] = &Progress{Next: next, Match: match}
 }
 
 func (r *raft) delProgress(id uint64) {

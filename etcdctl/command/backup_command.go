@@ -1,22 +1,21 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package command
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path"
@@ -73,7 +72,12 @@ func handleBackup(c *cli.Context) {
 	}
 	defer w.Close()
 	wmetadata, state, ents, err := w.ReadAll()
-	if err != nil {
+	switch err {
+	case nil:
+	case wal.ErrSnapshotNotFound:
+		fmt.Printf("Failed to find the match snapshot record %+v in wal %v.", walsnap, srcWAL)
+		fmt.Printf("etcdctl will add it back. Start auto fixing...")
+	default:
 		log.Fatal(err)
 	}
 	var metadata etcdserverpb.Metadata
@@ -88,6 +92,9 @@ func handleBackup(c *cli.Context) {
 	}
 	defer neww.Close()
 	if err := neww.Save(state, ents); err != nil {
+		log.Fatal(err)
+	}
+	if err := neww.SaveSnapshot(walsnap); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -22,11 +22,11 @@ To start etcd automatically using custom settings at startup in Linux, using a [
 + Number of committed transactions to trigger a snapshot to disk.
 + default: "10000"
 
-##### heartbeat-interval 
+##### -heartbeat-interval
 + Time (in milliseconds) of a heartbeat interval.
 + default: "100"
 
-##### election-timeout 
+##### -election-timeout
 + Time (in milliseconds) for an election to timeout.
 + default: "1000"
 
@@ -67,15 +67,17 @@ To start etcd automatically using custom settings at startup in Linux, using a [
 + Initial cluster configuration for bootstrapping.
 + default: "default=http://localhost:2380,default=http://localhost:7001"
 
-##### initial-cluster-state
-+ Initial cluster state ("new" or "existing").
+##### -initial-cluster-state
++ Initial cluster state ("new" or "existing"). Set to `new` for all members present during initial static or DNS bootstrapping. If this option is set to `existing`, etcd will attempt to join the existing cluster. If the wrong value is set, etcd will attempt to start but fail safely.
 + default: "new"
 
-##### initial-cluster-token
+[static bootstrap]: clustering.md#static
+
+##### -initial-cluster-token
 + Initial cluster token for the etcd cluster during bootstrap.
 + default: "etcd-cluster"
 
-##### advertise-client-urls
+##### -advertise-client-urls
 + List of this member's client URLs to advertise to the rest of the cluster.
 + default: "http://localhost:2379,http://localhost:4001"
 

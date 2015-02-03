@@ -1,18 +1,16 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package command
 
@@ -158,16 +156,41 @@ func actionMemberRemove(c *cli.Context) {
 		fmt.Fprintln(os.Stderr, "Provide a single member ID")
 		os.Exit(1)
 	}
+	removalID := args[0]
 
 	mAPI := mustNewMembersAPI(c)
-	mID := args[0]
-	ctx, cancel := context.WithTimeout(context.Background(), client.DefaultRequestTimeout)
-	err := mAPI.Remove(ctx, mID)
-	cancel()
+	// Get the list of members.
+	listctx, cancel := context.WithTimeout(context.Background(), client.DefaultRequestTimeout)
+	members, err := mAPI.List(listctx)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintln(os.Stderr, "Error while verifying ID against known members:", err.Error())
+		os.Exit(1)
+	}
+	// Sanity check the input.
+	foundID := false
+	for _, m := range members {
+		if m.ID == removalID {
+			foundID = true
+		}
+		if m.Name == removalID {
+			// Note that, so long as it's not ambiguous, we *could* do the right thing by name here.
+			fmt.Fprintf(os.Stderr, "Found a member named %s; if this is correct, please use its ID, eg:\n\tetcdctl member remove %s\n", m.Name, m.ID)
+			fmt.Fprintf(os.Stderr, "For more details, read the documentation at https://github.com/coreos/etcd/blob/master/Documentation/runtime-configuration.md#remove-a-member\n\n")
+		}
+	}
+	if !foundID {
+		fmt.Fprintf(os.Stderr, "Couldn't find a member in the cluster with an ID of %s.\n", removalID)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Removed member %s from cluster\n", mID)
+	// Actually attempt to remove the member.
+	ctx, cancel := context.WithTimeout(context.Background(), client.DefaultRequestTimeout)
+	err = mAPI.Remove(ctx, removalID)
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Recieved an error trying to remove member %s: %s", removalID, err.Error())
+		os.Exit(1)
+	}
+
+	fmt.Printf("Removed member %s from cluster\n", removalID)
 }

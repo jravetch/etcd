@@ -1,3 +1,17 @@
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package migrate
 
 import (
@@ -29,7 +43,7 @@ type Snapshot4 struct {
 	} `json:"peers"`
 }
 
-type sstore struct {
+type Store4 struct {
 	Root           *node
 	CurrentIndex   uint64
 	CurrentVersion int
@@ -151,7 +165,7 @@ func mangleRoot(n *node) *node {
 }
 
 func (s *Snapshot4) GetNodesFromStore() map[string]uint64 {
-	st := &sstore{}
+	st := &Store4{}
 	if err := json.Unmarshal(s.State, st); err != nil {
 		log.Fatal("Couldn't unmarshal snapshot")
 	}
@@ -160,7 +174,7 @@ func (s *Snapshot4) GetNodesFromStore() map[string]uint64 {
 }
 
 func (s *Snapshot4) Snapshot2() *raftpb.Snapshot {
-	st := &sstore{}
+	st := &Store4{}
 	if err := json.Unmarshal(s.State, st); err != nil {
 		log.Fatal("Couldn't unmarshal snapshot")
 	}
@@ -181,7 +195,7 @@ func (s *Snapshot4) Snapshot2() *raftpb.Snapshot {
 		Data: newState,
 		Metadata: raftpb.SnapshotMetadata{
 			Index: s.LastIndex,
-			Term:  s.LastTerm,
+			Term:  s.LastTerm + termOffset4to2,
 			ConfState: raftpb.ConfState{
 				Nodes: nodeList,
 			},

@@ -1,18 +1,16 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package raft
 
@@ -64,16 +62,16 @@ func TestProgressUpdate(t *testing.T) {
 		{prevM + 2, prevM + 2, prevN + 1}, // increase match, next
 	}
 	for i, tt := range tests {
-		p := &progress{
-			match: prevM,
-			next:  prevN,
+		p := &Progress{
+			Match: prevM,
+			Next:  prevN,
 		}
 		p.update(tt.update)
-		if p.match != tt.wm {
-			t.Errorf("#%d: match= %d, want %d", i, p.match, tt.wm)
+		if p.Match != tt.wm {
+			t.Errorf("#%d: match= %d, want %d", i, p.Match, tt.wm)
 		}
-		if p.next != tt.wn {
-			t.Errorf("#%d: next= %d, want %d", i, p.next, tt.wn)
+		if p.Next != tt.wn {
+			t.Errorf("#%d: next= %d, want %d", i, p.Next, tt.wn)
 		}
 	}
 }
@@ -136,17 +134,17 @@ func TestProgressMaybeDecr(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		p := &progress{
-			match: tt.m,
-			next:  tt.n,
+		p := &Progress{
+			Match: tt.m,
+			Next:  tt.n,
 		}
 		if g := p.maybeDecrTo(tt.rejected, tt.last); g != tt.w {
 			t.Errorf("#%d: maybeDecrTo= %t, want %t", i, g, tt.w)
 		}
-		if gm := p.match; gm != tt.m {
+		if gm := p.Match; gm != tt.m {
 			t.Errorf("#%d: match= %d, want %d", i, gm, tt.m)
 		}
-		if gn := p.next; gn != tt.wn {
+		if gn := p.Next; gn != tt.wn {
 			t.Errorf("#%d: next= %d, want %d", i, gn, tt.wn)
 		}
 	}
@@ -166,9 +164,9 @@ func TestProgressShouldWait(t *testing.T) {
 		{0, 0, false},
 	}
 	for i, tt := range tests {
-		p := &progress{
-			match: tt.m,
-			wait:  tt.wait,
+		p := &Progress{
+			Match: tt.m,
+			Wait:  tt.wait,
 		}
 		if g := p.shouldWait(); g != tt.w {
 			t.Errorf("#%d: shouldwait = %t, want %t", i, g, tt.w)
@@ -179,35 +177,35 @@ func TestProgressShouldWait(t *testing.T) {
 // TestProgressWaitReset ensures that progress.Update and progress.DercTo
 // will reset progress.wait.
 func TestProgressWaitReset(t *testing.T) {
-	p := &progress{
-		wait: 1,
+	p := &Progress{
+		Wait: 1,
 	}
 	p.maybeDecrTo(1, 1)
-	if p.wait != 0 {
-		t.Errorf("wait= %d, want 0", p.wait)
+	if p.Wait != 0 {
+		t.Errorf("wait= %d, want 0", p.Wait)
 	}
-	p.wait = 1
+	p.Wait = 1
 	p.update(2)
-	if p.wait != 0 {
-		t.Errorf("wait= %d, want 0", p.wait)
+	if p.Wait != 0 {
+		t.Errorf("wait= %d, want 0", p.Wait)
 	}
 }
 
 // TestProgressDecr ensures raft.heartbeat decreases progress.wait by heartbeat.
 func TestProgressDecr(t *testing.T) {
-	r := newRaft(1, []uint64{1, 2}, 5, 1, NewMemoryStorage())
+	r := newRaft(1, []uint64{1, 2}, 5, 1, NewMemoryStorage(), 0)
 	r.becomeCandidate()
 	r.becomeLeader()
-	r.prs[2].wait = r.heartbeatTimeout * 2
+	r.prs[2].Wait = r.heartbeatTimeout * 2
 
 	r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgBeat})
-	if r.prs[2].wait != r.heartbeatTimeout*(2-1) {
-		t.Errorf("wait = %d, want %d", r.prs[2].wait, r.heartbeatTimeout*(2-1))
+	if r.prs[2].Wait != r.heartbeatTimeout*(2-1) {
+		t.Errorf("wait = %d, want %d", r.prs[2].Wait, r.heartbeatTimeout*(2-1))
 	}
 }
 
 func TestProgressWait(t *testing.T) {
-	r := newRaft(1, []uint64{1, 2}, 5, 1, NewMemoryStorage())
+	r := newRaft(1, []uint64{1, 2}, 5, 1, NewMemoryStorage(), 0)
 	r.becomeCandidate()
 	r.becomeLeader()
 	r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("somedata")}}})
@@ -399,9 +397,9 @@ func TestCommitWithoutNewTermEntry(t *testing.T) {
 }
 
 func TestDuelingCandidates(t *testing.T) {
-	a := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
-	b := newRaft(2, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
-	c := newRaft(3, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	a := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage(), 0)
+	b := newRaft(2, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage(), 0)
+	c := newRaft(3, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage(), 0)
 
 	nt := newNetwork(a, b, c)
 	nt.cut(1, 3)
@@ -669,7 +667,7 @@ func TestCommit(t *testing.T) {
 		storage.Append(tt.logs)
 		storage.hardState = pb.HardState{Term: tt.smTerm}
 
-		sm := newRaft(1, []uint64{1}, 5, 1, storage)
+		sm := newRaft(1, []uint64{1}, 5, 1, storage, 0)
 		for j := 0; j < len(tt.matches); j++ {
 			sm.setProgress(uint64(j)+1, tt.matches[j], tt.matches[j]+1)
 		}
@@ -694,7 +692,7 @@ func TestIsElectionTimeout(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		sm := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage())
+		sm := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage(), 0)
 		sm.elapsed = tt.elapse
 		c := 0
 		for j := 0; j < 10000; j++ {
@@ -719,7 +717,7 @@ func TestStepIgnoreOldTermMsg(t *testing.T) {
 	fakeStep := func(r *raft, m pb.Message) {
 		called = true
 	}
-	sm := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage())
+	sm := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage(), 0)
 	sm.step = fakeStep
 	sm.Term = 2
 	sm.Step(pb.Message{Type: pb.MsgApp, Term: sm.Term - 1})
@@ -761,7 +759,7 @@ func TestHandleMsgApp(t *testing.T) {
 	for i, tt := range tests {
 		storage := NewMemoryStorage()
 		storage.Append([]pb.Entry{{Index: 1, Term: 1}, {Index: 2, Term: 2}})
-		sm := newRaft(1, []uint64{1}, 10, 1, storage)
+		sm := newRaft(1, []uint64{1}, 10, 1, storage, 0)
 		sm.becomeFollower(2, None)
 
 		sm.handleAppendEntries(tt.m)
@@ -795,7 +793,7 @@ func TestHandleHeartbeat(t *testing.T) {
 	for i, tt := range tests {
 		storage := NewMemoryStorage()
 		storage.Append([]pb.Entry{{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 3}})
-		sm := newRaft(1, []uint64{1, 2}, 5, 1, storage)
+		sm := newRaft(1, []uint64{1, 2}, 5, 1, storage, 0)
 		sm.becomeFollower(2, 2)
 		sm.raftLog.commitTo(commit)
 		sm.handleHeartbeat(tt.m)
@@ -816,7 +814,7 @@ func TestHandleHeartbeat(t *testing.T) {
 func TestHandleHeartbeatResp(t *testing.T) {
 	storage := NewMemoryStorage()
 	storage.Append([]pb.Entry{{Index: 1, Term: 1}, {Index: 2, Term: 2}, {Index: 3, Term: 3}})
-	sm := newRaft(1, []uint64{1, 2}, 5, 1, storage)
+	sm := newRaft(1, []uint64{1, 2}, 5, 1, storage, 0)
 	sm.becomeCandidate()
 	sm.becomeLeader()
 	sm.raftLog.commitTo(sm.raftLog.lastIndex())
@@ -858,14 +856,79 @@ func TestHandleHeartbeatResp(t *testing.T) {
 		Type:  pb.MsgAppResp,
 		Index: msgs[1].Index + uint64(len(msgs[1].Entries)),
 	})
+	// Consume the message sent in response to MsgAppResp
+	sm.readMessages()
+
 	sm.bcastHeartbeat() // reset wait state
 	sm.Step(pb.Message{From: 2, Type: pb.MsgHeartbeatResp})
 	msgs = sm.readMessages()
 	if len(msgs) != 1 {
-		t.Fatalf("len(msgs) = %d, want 1", len(msgs))
+		t.Fatalf("len(msgs) = %d, want 1: %+v", len(msgs), msgs)
 	}
 	if msgs[0].Type != pb.MsgHeartbeat {
 		t.Errorf("type = %v, want MsgHeartbeat", msgs[0].Type)
+	}
+}
+
+// TestMsgAppRespWaitReset verifies the waitReset behavior of a leader
+// MsgAppResp.
+func TestMsgAppRespWaitReset(t *testing.T) {
+	sm := newRaft(1, []uint64{1, 2, 3}, 5, 1, NewMemoryStorage(), 0)
+	sm.becomeCandidate()
+	sm.becomeLeader()
+
+	// The new leader has just emitted a new Term 4 entry; consume those messages
+	// from the outgoing queue.
+	sm.bcastAppend()
+	sm.readMessages()
+
+	// Node 2 acks the first entry, making it committed.
+	sm.Step(pb.Message{
+		From:  2,
+		Type:  pb.MsgAppResp,
+		Index: 1,
+	})
+	if sm.Commit != 1 {
+		t.Fatalf("expected Commit to be 1, got %d", sm.Commit)
+	}
+	// Also consume the MsgApp messages that update Commit on the followers.
+	sm.readMessages()
+
+	// A new command is now proposed on node 1.
+	sm.Step(pb.Message{
+		From:    1,
+		Type:    pb.MsgProp,
+		Entries: []pb.Entry{{}},
+	})
+
+	// The command is broadcast to all nodes not in the wait state.
+	// Node 2 left the wait state due to its MsgAppResp, but node 3 is still waiting.
+	msgs := sm.readMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Type != pb.MsgApp || msgs[0].To != 2 {
+		t.Errorf("expected MsgApp to node 2, got %s to %d", msgs[0].Type, msgs[0].To)
+	}
+	if len(msgs[0].Entries) != 1 || msgs[0].Entries[0].Index != 2 {
+		t.Errorf("expected to send entry 2, but got %v", msgs[0].Entries)
+	}
+
+	// Now Node 3 acks the first entry. This releases the wait and entry 2 is sent.
+	sm.Step(pb.Message{
+		From:  3,
+		Type:  pb.MsgAppResp,
+		Index: 1,
+	})
+	msgs = sm.readMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Type != pb.MsgApp || msgs[0].To != 3 {
+		t.Errorf("expected MsgApp to node 3, got %s to %d", msgs[0].Type, msgs[0].To)
+	}
+	if len(msgs[0].Entries) != 1 || msgs[0].Entries[0].Index != 2 {
+		t.Errorf("expected to send entry 2, but got %v", msgs[0].Entries)
 	}
 }
 
@@ -904,7 +967,7 @@ func TestRecvMsgVote(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		sm := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage())
+		sm := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage(), 0)
 		sm.state = tt.state
 		switch tt.state {
 		case StateFollower:
@@ -964,7 +1027,7 @@ func TestStateTransition(t *testing.T) {
 				}
 			}()
 
-			sm := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage())
+			sm := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage(), 0)
 			sm.state = tt.from
 
 			switch tt.to {
@@ -1003,7 +1066,7 @@ func TestAllServerStepdown(t *testing.T) {
 	tterm := uint64(3)
 
 	for i, tt := range tests {
-		sm := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+		sm := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage(), 0)
 		switch tt.state {
 		case StateFollower:
 			sm.becomeFollower(1, None)
@@ -1062,7 +1125,7 @@ func TestLeaderAppResp(t *testing.T) {
 	for i, tt := range tests {
 		// sm term is 1 after it becomes the leader.
 		// thus the last log term must be 1 to be committed.
-		sm := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+		sm := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage(), 0)
 		sm.raftLog = &raftLog{
 			storage:  &MemoryStorage{ents: []pb.Entry{{}, {Index: 1, Term: 0}, {Index: 2, Term: 1}}},
 			unstable: unstable{offset: 3},
@@ -1073,11 +1136,11 @@ func TestLeaderAppResp(t *testing.T) {
 		sm.Step(pb.Message{From: 2, Type: pb.MsgAppResp, Index: tt.index, Term: sm.Term, Reject: tt.reject, RejectHint: tt.index})
 
 		p := sm.prs[2]
-		if p.match != tt.wmatch {
-			t.Errorf("#%d match = %d, want %d", i, p.match, tt.wmatch)
+		if p.Match != tt.wmatch {
+			t.Errorf("#%d match = %d, want %d", i, p.Match, tt.wmatch)
 		}
-		if p.next != tt.wnext {
-			t.Errorf("#%d next = %d, want %d", i, p.next, tt.wnext)
+		if p.Next != tt.wnext {
+			t.Errorf("#%d next = %d, want %d", i, p.Next, tt.wnext)
 		}
 
 		msgs := sm.readMessages()
@@ -1110,7 +1173,7 @@ func TestBcastBeat(t *testing.T) {
 	}
 	storage := NewMemoryStorage()
 	storage.ApplySnapshot(s)
-	sm := newRaft(1, nil, 10, 1, storage)
+	sm := newRaft(1, nil, 10, 1, storage, 0)
 	sm.Term = 1
 
 	sm.becomeCandidate()
@@ -1119,9 +1182,9 @@ func TestBcastBeat(t *testing.T) {
 		sm.appendEntry(pb.Entry{Index: uint64(i) + 1})
 	}
 	// slow follower
-	sm.prs[2].match, sm.prs[2].next = 5, 6
+	sm.prs[2].Match, sm.prs[2].Next = 5, 6
 	// normal follower
-	sm.prs[3].match, sm.prs[3].next = sm.raftLog.lastIndex(), sm.raftLog.lastIndex()+1
+	sm.prs[3].Match, sm.prs[3].Next = sm.raftLog.lastIndex(), sm.raftLog.lastIndex()+1
 
 	sm.Step(pb.Message{Type: pb.MsgBeat})
 	msgs := sm.readMessages()
@@ -1129,8 +1192,8 @@ func TestBcastBeat(t *testing.T) {
 		t.Fatalf("len(msgs) = %v, want 2", len(msgs))
 	}
 	wantCommitMap := map[uint64]uint64{
-		2: min(sm.raftLog.committed, sm.prs[2].match),
-		3: min(sm.raftLog.committed, sm.prs[3].match),
+		2: min(sm.raftLog.committed, sm.prs[2].Match),
+		3: min(sm.raftLog.committed, sm.prs[3].Match),
 	}
 	for i, m := range msgs {
 		if m.Type != pb.MsgHeartbeat {
@@ -1169,7 +1232,7 @@ func TestRecvMsgBeat(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		sm := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+		sm := newRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage(), 0)
 		sm.raftLog = &raftLog{storage: &MemoryStorage{ents: []pb.Entry{{}, {Index: 1, Term: 0}, {Index: 2, Term: 1}}}}
 		sm.Term = 1
 		sm.state = tt.state
@@ -1212,16 +1275,16 @@ func TestLeaderIncreaseNext(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		sm := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage())
+		sm := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage(), 0)
 		sm.raftLog.append(previousEnts...)
 		sm.becomeCandidate()
 		sm.becomeLeader()
-		sm.prs[2].match, sm.prs[2].next = tt.match, tt.next
+		sm.prs[2].Match, sm.prs[2].Next = tt.match, tt.next
 		sm.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("somedata")}}})
 
 		p := sm.prs[2]
-		if p.next != tt.wnext {
-			t.Errorf("#%d next = %d, want %d", i, p.next, tt.wnext)
+		if p.Next != tt.wnext {
+			t.Errorf("#%d next = %d, want %d", i, p.Next, tt.wnext)
 		}
 	}
 }
@@ -1236,7 +1299,7 @@ func TestRestore(t *testing.T) {
 	}
 
 	storage := NewMemoryStorage()
-	sm := newRaft(1, []uint64{1, 2}, 10, 1, storage)
+	sm := newRaft(1, []uint64{1, 2}, 10, 1, storage, 0)
 	if ok := sm.restore(s); !ok {
 		t.Fatal("restore fail, want succeed")
 	}
@@ -1261,7 +1324,7 @@ func TestRestoreIgnoreSnapshot(t *testing.T) {
 	previousEnts := []pb.Entry{{Term: 1, Index: 1}, {Term: 1, Index: 2}, {Term: 1, Index: 3}}
 	commit := uint64(1)
 	storage := NewMemoryStorage()
-	sm := newRaft(1, []uint64{1, 2}, 10, 1, storage)
+	sm := newRaft(1, []uint64{1, 2}, 10, 1, storage, 0)
 	sm.raftLog.append(previousEnts...)
 	sm.raftLog.commitTo(commit)
 
@@ -1302,7 +1365,7 @@ func TestProvideSnap(t *testing.T) {
 		},
 	}
 	storage := NewMemoryStorage()
-	sm := newRaft(1, []uint64{1}, 10, 1, storage)
+	sm := newRaft(1, []uint64{1}, 10, 1, storage, 0)
 	sm.restore(s)
 
 	sm.becomeCandidate()
@@ -1310,9 +1373,9 @@ func TestProvideSnap(t *testing.T) {
 
 	// force set the next of node 1, so that
 	// node 1 needs a snapshot
-	sm.prs[2].next = sm.raftLog.firstIndex()
+	sm.prs[2].Next = sm.raftLog.firstIndex()
 
-	sm.Step(pb.Message{From: 2, To: 1, Type: pb.MsgAppResp, Index: sm.prs[2].next - 1, Reject: true})
+	sm.Step(pb.Message{From: 2, To: 1, Type: pb.MsgAppResp, Index: sm.prs[2].Next - 1, Reject: true})
 	msgs := sm.readMessages()
 	if len(msgs) != 1 {
 		t.Fatalf("len(msgs) = %d, want 1", len(msgs))
@@ -1333,7 +1396,7 @@ func TestRestoreFromSnapMsg(t *testing.T) {
 	}
 	m := pb.Message{Type: pb.MsgSnap, From: 1, Term: 2, Snapshot: s}
 
-	sm := newRaft(2, []uint64{1, 2}, 10, 1, NewMemoryStorage())
+	sm := newRaft(2, []uint64{1, 2}, 10, 1, NewMemoryStorage(), 0)
 	sm.Step(m)
 
 	// TODO(bdarnell): what should this test?
@@ -1367,7 +1430,7 @@ func TestSlowNodeRestore(t *testing.T) {
 // it appends the entry to log and sets pendingConf to be true.
 func TestStepConfig(t *testing.T) {
 	// a raft that cannot make progress
-	r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage())
+	r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage(), 0)
 	r.becomeCandidate()
 	r.becomeLeader()
 	index := r.raftLog.lastIndex()
@@ -1385,7 +1448,7 @@ func TestStepConfig(t *testing.T) {
 // the proposal to noop and keep its original state.
 func TestStepIgnoreConfig(t *testing.T) {
 	// a raft that cannot make progress
-	r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage())
+	r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage(), 0)
 	r.becomeCandidate()
 	r.becomeLeader()
 	r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Type: pb.EntryConfChange}}})
@@ -1412,7 +1475,7 @@ func TestRecoverPendingConfig(t *testing.T) {
 		{pb.EntryConfChange, true},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage())
+		r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage(), 0)
 		r.appendEntry(pb.Entry{Type: tt.entType})
 		r.becomeCandidate()
 		r.becomeLeader()
@@ -1431,7 +1494,7 @@ func TestRecoverDoublePendingConfig(t *testing.T) {
 				t.Errorf("expect panic, but nothing happens")
 			}
 		}()
-		r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage())
+		r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage(), 0)
 		r.appendEntry(pb.Entry{Type: pb.EntryConfChange})
 		r.appendEntry(pb.Entry{Type: pb.EntryConfChange})
 		r.becomeCandidate()
@@ -1441,7 +1504,7 @@ func TestRecoverDoublePendingConfig(t *testing.T) {
 
 // TestAddNode tests that addNode could update pendingConf and nodes correctly.
 func TestAddNode(t *testing.T) {
-	r := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage())
+	r := newRaft(1, []uint64{1}, 10, 1, NewMemoryStorage(), 0)
 	r.pendingConf = true
 	r.addNode(2)
 	if r.pendingConf != false {
@@ -1457,7 +1520,7 @@ func TestAddNode(t *testing.T) {
 // TestRemoveNode tests that removeNode could update pendingConf, nodes and
 // and removed list correctly.
 func TestRemoveNode(t *testing.T) {
-	r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage())
+	r := newRaft(1, []uint64{1, 2}, 10, 1, NewMemoryStorage(), 0)
 	r.pendingConf = true
 	r.removeNode(2)
 	if r.pendingConf != false {
@@ -1481,7 +1544,7 @@ func TestPromotable(t *testing.T) {
 		{[]uint64{2, 3}, false},
 	}
 	for i, tt := range tests {
-		r := newRaft(id, tt.peers, 5, 1, NewMemoryStorage())
+		r := newRaft(id, tt.peers, 5, 1, NewMemoryStorage(), 0)
 		if g := r.promotable(); g != tt.wp {
 			t.Errorf("#%d: promotable = %v, want %v", i, g, tt.wp)
 		}
@@ -1503,7 +1566,7 @@ func TestRaftNodes(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		r := newRaft(1, tt.ids, 10, 1, NewMemoryStorage())
+		r := newRaft(1, tt.ids, 10, 1, NewMemoryStorage(), 0)
 		if !reflect.DeepEqual(r.nodes(), tt.wids) {
 			t.Errorf("#%d: nodes = %+v, want %+v", i, r.nodes(), tt.wids)
 		}
@@ -1515,7 +1578,7 @@ func ents(terms ...uint64) *raft {
 	for i, term := range terms {
 		storage.Append([]pb.Entry{{Index: uint64(i + 1), Term: term}})
 	}
-	sm := newRaft(1, []uint64{}, 5, 1, storage)
+	sm := newRaft(1, []uint64{}, 5, 1, storage, 0)
 	sm.reset(0)
 	return sm
 }
@@ -1543,13 +1606,13 @@ func newNetwork(peers ...Interface) *network {
 		switch v := p.(type) {
 		case nil:
 			nstorage[id] = NewMemoryStorage()
-			sm := newRaft(id, peerAddrs, 10, 1, nstorage[id])
+			sm := newRaft(id, peerAddrs, 10, 1, nstorage[id], 0)
 			npeers[id] = sm
 		case *raft:
 			v.id = id
-			v.prs = make(map[uint64]*progress)
+			v.prs = make(map[uint64]*Progress)
 			for i := 0; i < size; i++ {
-				v.prs[peerAddrs[i]] = &progress{}
+				v.prs[peerAddrs[i]] = &Progress{}
 			}
 			v.reset(0)
 			npeers[id] = v

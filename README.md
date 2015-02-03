@@ -3,15 +3,9 @@
 [![Build Status](https://travis-ci.org/coreos/etcd.png?branch=master)](https://travis-ci.org/coreos/etcd)
 [![Docker Repository on Quay.io](https://quay.io/repository/coreos/etcd-git/status "Docker Repository on Quay.io")](https://quay.io/repository/coreos/etcd-git)
 
-### Release Candidate Disclaimer ###
-
-The current `master` branch of etcd is tracking the forthcoming 2.0.0 release.
-We encourage users to work with the [latest release candidate](https://github.com/coreos/etcd/releases/tag/v2.0.0-rc.1), but those looking for a stable release should obtain the latest 0.4.x release, [0.4.6](https://github.com/coreos/etcd/releases/tag/v0.4.6).
-
 ![etcd Logo](logos/etcd-horizontal-color.png)
 
-A highly-available key value store for shared configuration and service discovery.
-etcd is inspired by [Apache ZooKeeper][zookeeper] and [doozer][doozer], with a focus on being:
+etcd is a distributed, consistent key value store for shared configuration and service discovery with a focus on being:
 
 * *Simple*: curl'able user facing API (HTTP+JSON)
 * *Secure*: optional SSL client cert authentication
@@ -40,7 +34,7 @@ The latest release and setup instructions are available at [GitHub][github-relea
 
 ### Running etcd
 
-First start a single-machine cluster of etcd:
+First start a single-member cluster of etcd:
 
 ```sh
 ./bin/etcd
@@ -55,9 +49,25 @@ curl -L http://127.0.0.1:4001/v2/keys/mykey -XPUT -d value="this is awesome"
 curl -L http://127.0.0.1:4001/v2/keys/mykey
 ```
 
-You have successfully started an etcd on a single machine and written a key to the store. Now it's time to dig into the full etcd API and other guides.
+You have successfully started an etcd and written a key to the store.
+
+### Running local etcd cluster
+
+First install [goreman](https://github.com/mattn/goreman), which manages Procfile-based applications.
+
+Our [Profile script](./Procfile) will set up a local example cluster. You can start it with:
+
+```sh
+goreman start
+```
+
+This will bring up 3 etcd members `infra1`, `infra2` and `infra3` and etcd proxy `proxy`, which runs locally and composes a cluster.
+
+You can write a key to the cluster and retrieve the value back from any member or proxy.
 
 ### Next Steps
+
+Now it's time to dig into the full etcd API and other guides.
 
 - Explore the full [API][api].
 - Set up a [multi-machine cluster][clustering].
@@ -67,13 +77,13 @@ You have successfully started an etcd on a single machine and written a key to t
 - [Tune etcd][tuning].
 - [Upgrade from 0.4.6 to 2.0.0][upgrade].
 
-[api]: https://github.com/coreos/etcd/blob/master/Documentation/api.md
-[clustering]: https://github.com/coreos/etcd/blob/master/Documentation/clustering.md
-[configuration]: https://github.com/coreos/etcd/blob/master/Documentation/configuration.md
-[libraries-and-tools]: https://github.com/coreos/etcd/blob/master/Documentation/libraries-and-tools.md
-[security]: https://github.com/coreos/etcd/blob/master/Documentation/security.md
-[tuning]: https://github.com/coreos/etcd/blob/master/Documentation/tuning.md
-[upgrade]: https://github.com/coreos/etcd/blob/master/Documentation/0_4_migration_tool.md
+[api]: ./Documentation/api.md
+[clustering]: ./Documentation/clustering.md
+[configuration]: ./Documentation/configuration.md
+[libraries-and-tools]: ./Documentation/libraries-and-tools.md
+[security]: ./Documentation/security.md
+[tuning]: ./Documentation/tuning.md
+[upgrade]: ./Documentation/0_4_migration_tool.md
 
 ## Contact
 
@@ -103,9 +113,7 @@ curl -L http://127.0.0.1:4001/version
 
 #### API Versioning
 
-The `v2` API responses should not change after the 0.2.0 release but new features will be added over time.
-
-The `v1` API has been deprecated and will not be supported. It will be removed in the 2.0.0 release.
+The `v2` API responses should not change after the 2.0.0 release but new features will be added over time.
 
 #### 32-bit systems
 

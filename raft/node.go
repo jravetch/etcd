@@ -1,18 +1,16 @@
-/*
-   Copyright 2014 CoreOS, Inc.
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package raft
 
@@ -119,6 +117,8 @@ type Node interface {
 	// in snapshots. Will never return nil; it returns a pointer only
 	// to match MemoryStorage.Compact.
 	ApplyConfChange(cc pb.ConfChange) *pb.ConfState
+	// Status returns the current status of the raft state machine.
+	Status() Status
 	// Stop performs any necessary termination of the Node
 	Stop()
 }
@@ -133,7 +133,7 @@ type Peer struct {
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
 func StartNode(id uint64, peers []Peer, election, heartbeat int, storage Storage) Node {
 	n := newNode()
-	r := newRaft(id, nil, election, heartbeat, storage)
+	r := newRaft(id, nil, election, heartbeat, storage, 0)
 
 	// become the follower at term 1 and apply initial configuration
 	// entires of term 1
@@ -169,11 +169,13 @@ func StartNode(id uint64, peers []Peer, election, heartbeat int, storage Storage
 	return &n
 }
 
-// RestartNode is identical to StartNode but does not take a list of peers.
+// RestartNode is similar to StartNode but does not take a list of peers.
 // The current membership of the cluster will be restored from the Storage.
-func RestartNode(id uint64, election, heartbeat int, storage Storage) Node {
+// If the caller has an existing state machine, pass in the last log index that
+// has been applied to it; otherwise use zero.
+func RestartNode(id uint64, election, heartbeat int, storage Storage, applied uint64) Node {
 	n := newNode()
-	r := newRaft(id, nil, election, heartbeat, storage)
+	r := newRaft(id, nil, election, heartbeat, storage, applied)
 
 	go n.run(r)
 	return &n
@@ -190,6 +192,7 @@ type node struct {
 	tickc      chan struct{}
 	done       chan struct{}
 	stop       chan struct{}
+	status     chan chan Status
 }
 
 func newNode() node {
@@ -203,6 +206,7 @@ func newNode() node {
 		tickc:      make(chan struct{}),
 		done:       make(chan struct{}),
 		stop:       make(chan struct{}),
+		status:     make(chan chan Status),
 	}
 }
 
@@ -222,8 +226,7 @@ func (n *node) run(r *raft) {
 	var propc chan pb.Message
 	var readyc chan Ready
 	var advancec chan struct{}
-	var prevLastUnstablei uint64
-	var prevLastUnstablet uint64
+	var prevLastUnstablei, prevLastUnstablet uint64
 	var havePrevLastUnstablei bool
 	var prevSnapi uint64
 	var rd Ready
@@ -328,6 +331,8 @@ func (n *node) run(r *raft) {
 			}
 			r.raftLog.stableSnapTo(prevSnapi)
 			advancec = nil
+		case c := <-n.status:
+			c <- getStatus(r)
 		case <-n.stop:
 			close(n.done)
 			return
@@ -405,6 +410,12 @@ func (n *node) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 	case <-n.done:
 	}
 	return &cs
+}
+
+func (n *node) Status() Status {
+	c := make(chan Status)
+	n.status <- c
+	return <-c
 }
 
 func newReady(r *raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
