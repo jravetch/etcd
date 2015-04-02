@@ -25,6 +25,7 @@ import (
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/jonboulle/clockwork"
 	etcdErr "github.com/coreos/etcd/error"
+	"github.com/coreos/etcd/pkg/types"
 )
 
 // The default version to set when the store is first initialized.
@@ -55,6 +56,9 @@ type Store interface {
 	Save() ([]byte, error)
 	Recovery(state []byte) error
 
+	Clone() Store
+	SaveNoCopy() ([]byte, error)
+
 	JsonStats() []byte
 	DeleteExpiredKeys(cutoff time.Time)
 }
@@ -68,21 +72,27 @@ type store struct {
 	ttlKeyHeap     *ttlKeyHeap  // need to recovery manually
 	worldLock      sync.RWMutex // stop the world lock
 	clock          clockwork.Clock
+	readonlySet    types.Set
 }
 
-func New() Store {
-	s := newStore()
+// The given namespaces will be created as initial directories in the returned store.
+func New(namespaces ...string) Store {
+	s := newStore(namespaces...)
 	s.clock = clockwork.NewRealClock()
 	return s
 }
 
-func newStore() *store {
+func newStore(namespaces ...string) *store {
 	s := new(store)
 	s.CurrentVersion = defaultVersion
-	s.Root = newDir(s, "/", s.CurrentIndex, nil, "", Permanent)
+	s.Root = newDir(s, "/", s.CurrentIndex, nil, Permanent)
+	for _, namespace := range namespaces {
+		s.Root.Add(newDir(s, namespace, s.CurrentIndex, s.Root, Permanent))
+	}
 	s.Stats = newStats()
 	s.WatcherHub = newWatchHub(1000)
 	s.ttlKeyHeap = newTtlKeyHeap()
+	s.readonlySet = types.NewUnsafeSet(append(namespaces, "/")...)
 	return s
 }
 
@@ -203,7 +213,7 @@ func (s *store) CompareAndSwap(nodePath string, prevValue string, prevIndex uint
 
 	nodePath = path.Clean(path.Join("/", nodePath))
 	// we do not allow the user to change "/"
-	if nodePath == "/" {
+	if s.readonlySet.Contains(nodePath) {
 		return nil, etcdErr.NewError(etcdErr.EcodeRootROnly, "/", s.CurrentIndex)
 	}
 
@@ -258,7 +268,7 @@ func (s *store) Delete(nodePath string, dir, recursive bool) (*Event, error) {
 
 	nodePath = path.Clean(path.Join("/", nodePath))
 	// we do not allow the user to change "/"
-	if nodePath == "/" {
+	if s.readonlySet.Contains(nodePath) {
 		return nil, etcdErr.NewError(etcdErr.EcodeRootROnly, "/", s.CurrentIndex)
 	}
 
@@ -401,7 +411,7 @@ func (s *store) Update(nodePath string, newValue string, expireTime time.Time) (
 
 	nodePath = path.Clean(path.Join("/", nodePath))
 	// we do not allow the user to change "/"
-	if nodePath == "/" {
+	if s.readonlySet.Contains(nodePath) {
 		return nil, etcdErr.NewError(etcdErr.EcodeRootROnly, "/", s.CurrentIndex)
 	}
 
@@ -461,7 +471,7 @@ func (s *store) internalCreate(nodePath string, dir bool, value string, unique, 
 	nodePath = path.Clean(path.Join("/", nodePath))
 
 	// we do not allow the user to change "/"
-	if nodePath == "/" {
+	if s.readonlySet.Contains(nodePath) {
 		return nil, etcdErr.NewError(etcdErr.EcodeRootROnly, "/", currIndex)
 	}
 
@@ -506,12 +516,12 @@ func (s *store) internalCreate(nodePath string, dir bool, value string, unique, 
 		valueCopy := value
 		eNode.Value = &valueCopy
 
-		n = newKV(s, nodePath, value, nextIndex, d, "", expireTime)
+		n = newKV(s, nodePath, value, nextIndex, d, expireTime)
 
 	} else { // create directory
 		eNode.Dir = true
 
-		n = newDir(s, nodePath, nextIndex, d, "", expireTime)
+		n = newDir(s, nodePath, nextIndex, d, expireTime)
 	}
 
 	// we are sure d is a directory and does not have the children with name n.Name
@@ -602,7 +612,7 @@ func (s *store) checkDir(parent *node, dirName string) (*node, *etcdErr.Error) {
 		return nil, etcdErr.NewError(etcdErr.EcodeNotDir, node.Path, s.CurrentIndex)
 	}
 
-	n := newDir(s, path.Join(parent.Path, dirName), s.CurrentIndex+1, parent, parent.ACL, Permanent)
+	n := newDir(s, path.Join(parent.Path, dirName), s.CurrentIndex+1, parent, Permanent)
 
 	parent.Children[dirName] = n
 
@@ -614,6 +624,24 @@ func (s *store) checkDir(parent *node, dirName string) (*node, *etcdErr.Error) {
 // It will not save the parent field of the node. Or there will
 // be cyclic dependencies issue for the json package.
 func (s *store) Save() ([]byte, error) {
+	b, err := json.Marshal(s.Clone())
+	if err != nil {
+		return nil, err
+	}
+
+	return b, nil
+}
+
+func (s *store) SaveNoCopy() ([]byte, error) {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+
+	return b, nil
+}
+
+func (s *store) Clone() Store {
 	s.worldLock.Lock()
 
 	clonedStore := newStore()
@@ -624,14 +652,7 @@ func (s *store) Save() ([]byte, error) {
 	clonedStore.CurrentVersion = s.CurrentVersion
 
 	s.worldLock.Unlock()
-
-	b, err := json.Marshal(clonedStore)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return b, nil
+	return clonedStore
 }
 
 // Recovery recovers the store system from a static state

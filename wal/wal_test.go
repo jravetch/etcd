@@ -156,7 +156,7 @@ func TestCut(t *testing.T) {
 	if err := w.Save(state, []raftpb.Entry{{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Cut(); err != nil {
+	if err := w.cut(); err != nil {
 		t.Fatal(err)
 	}
 	wname := walName(1, 1)
@@ -168,7 +168,7 @@ func TestCut(t *testing.T) {
 	if err := w.Save(raftpb.HardState{}, es); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Cut(); err != nil {
+	if err := w.cut(); err != nil {
 		t.Fatal(err)
 	}
 	snap := walpb.Snapshot{Index: 2, Term: 1}
@@ -323,23 +323,23 @@ func TestRecoverAfterCut(t *testing.T) {
 	}
 	defer os.RemoveAll(p)
 
-	w, err := Create(p, []byte("metadata"))
+	md, err := Create(p, []byte("metadata"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 10; i++ {
-		if err = w.SaveSnapshot(walpb.Snapshot{Index: uint64(i)}); err != nil {
+		if err = md.SaveSnapshot(walpb.Snapshot{Index: uint64(i)}); err != nil {
 			t.Fatal(err)
 		}
 		es := []raftpb.Entry{{Index: uint64(i)}}
-		if err = w.Save(raftpb.HardState{}, es); err != nil {
+		if err = md.Save(raftpb.HardState{}, es); err != nil {
 			t.Fatal(err)
 		}
-		if err = w.Cut(); err != nil {
+		if err = md.cut(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	w.Close()
+	md.Close()
 
 	if err := os.Remove(path.Join(p, walName(4, 4))); err != nil {
 		t.Fatal(err)
@@ -427,7 +427,7 @@ func TestOpenNotInUse(t *testing.T) {
 		if err = w.Save(raftpb.HardState{}, es); err != nil {
 			t.Fatal(err)
 		}
-		if err = w.Cut(); err != nil {
+		if err = w.cut(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -435,6 +435,7 @@ func TestOpenNotInUse(t *testing.T) {
 	unlockIndex := uint64(5)
 	w.ReleaseLockTo(unlockIndex)
 
+	// 1,2,3 are avaliable.
 	w2, err := OpenNotInUse(p, walpb.Snapshot{})
 	defer w2.Close()
 	if err != nil {
@@ -444,8 +445,8 @@ func TestOpenNotInUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	if g := ents[len(ents)-1].Index; g != unlockIndex {
-		t.Errorf("last index read = %d, want %d", g, unlockIndex)
+	if g := ents[len(ents)-1].Index; g != unlockIndex-2 {
+		t.Errorf("last index read = %d, want %d", g, unlockIndex-2)
 	}
 }
 
@@ -460,5 +461,64 @@ func TestSaveEmpty(t *testing.T) {
 	}
 	if len(buf.Bytes()) != 0 {
 		t.Errorf("buf.Bytes = %d, want 0", len(buf.Bytes()))
+	}
+}
+
+func TestReleaseLockTo(t *testing.T) {
+	p, err := ioutil.TempDir(os.TempDir(), "waltest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(p)
+	// create WAL
+	w, err := Create(p, nil)
+	defer w.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// make 10 seperate files
+	for i := 0; i < 10; i++ {
+		es := []raftpb.Entry{{Index: uint64(i)}}
+		if err = w.Save(raftpb.HardState{}, es); err != nil {
+			t.Fatal(err)
+		}
+		if err = w.cut(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// release the lock to 5
+	unlockIndex := uint64(5)
+	w.ReleaseLockTo(unlockIndex)
+
+	// expected remaining are 4,5,6,7,8,9,10
+	if len(w.locks) != 7 {
+		t.Errorf("len(w.locks) = %d, want %d", len(w.locks), 7)
+	}
+	for i, l := range w.locks {
+		_, lockIndex, err := parseWalName(path.Base(l.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if lockIndex != uint64(i+4) {
+			t.Errorf("#%d: lockindex = %d, want %d", i, lockIndex, uint64(i+4))
+		}
+	}
+
+	// release the lock to 15
+	unlockIndex = uint64(15)
+	w.ReleaseLockTo(unlockIndex)
+
+	// expected remaining is 10
+	if len(w.locks) != 1 {
+		t.Errorf("len(w.locks) = %d, want %d", len(w.locks), 1)
+	}
+	_, lockIndex, err := parseWalName(path.Base(w.locks[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if lockIndex != uint64(10) {
+		t.Errorf("lockindex = %d, want %d", lockIndex, 10)
 	}
 }

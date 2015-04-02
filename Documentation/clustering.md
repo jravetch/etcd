@@ -6,7 +6,7 @@ Starting an etcd cluster statically requires that each member knows another in t
 
 Once an etcd cluster is up and running, adding or removing members is done via [runtime reconfiguration](runtime-configuration.md).
 
-This guide willcover the following mechanisms for bootstrapping an etcd cluster:
+This guide will cover the following mechanisms for bootstrapping an etcd cluster:
 
 * [Static](#static)
 * [etcd Discovery](#etcd-discovery)
@@ -30,7 +30,7 @@ ETCD_INITIAL_CLUSTER_STATE=new
 ```
 
 ```
--initial-cluster infra0=http://10.0.1.10:2380,http://10.0.1.11:2380,infra2=http://10.0.1.12:2380 \
+-initial-cluster infra0=http://10.0.1.10:2380,infra1=http://10.0.1.11:2380,infra2=http://10.0.1.12:2380 \
   -initial-cluster-state new
 ```
 

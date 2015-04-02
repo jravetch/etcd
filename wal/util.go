@@ -15,51 +15,17 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path"
+	"strings"
 
 	"github.com/coreos/etcd/pkg/fileutil"
-	"github.com/coreos/etcd/pkg/types"
 )
 
-// WalVersion is an enum for versions of etcd logs.
-type WalVersion string
-
-const (
-	WALUnknown  WalVersion = "Unknown WAL"
-	WALNotExist WalVersion = "No WAL"
-	WALv0_4     WalVersion = "0.4.x"
-	WALv0_5     WalVersion = "0.5.x"
+var (
+	badWalName = errors.New("bad wal name")
 )
-
-func DetectVersion(dirpath string) (WalVersion, error) {
-	names, err := fileutil.ReadDir(dirpath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			err = nil
-		}
-		// Error reading the directory
-		return WALNotExist, err
-	}
-	if len(names) == 0 {
-		// Empty WAL directory
-		return WALNotExist, nil
-	}
-	nameSet := types.NewUnsafeSet(names...)
-	if nameSet.ContainsAll([]string{"snap", "wal"}) {
-		// .../wal cannot be empty to exist.
-		if Exist(path.Join(dirpath, "wal")) {
-			return WALv0_5, nil
-		}
-	}
-	if nameSet.ContainsAll([]string{"snapshot", "conf", "log"}) {
-		return WALv0_4, nil
-	}
-
-	return WALUnknown, nil
-}
 
 func Exist(dirpath string) bool {
 	names, err := fileutil.ReadDir(dirpath)
@@ -116,8 +82,11 @@ func checkWalNames(names []string) []string {
 }
 
 func parseWalName(str string) (seq, index uint64, err error) {
+	if !strings.HasSuffix(str, ".wal") {
+		return 0, 0, badWalName
+	}
 	_, err = fmt.Sscanf(str, "%016x-%016x.wal", &seq, &index)
-	return
+	return seq, index, err
 }
 
 func walName(seq, index uint64) string {

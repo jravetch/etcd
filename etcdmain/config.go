@@ -41,6 +41,8 @@ const (
 
 	clusterStateFlagNew      = "new"
 	clusterStateFlagExisting = "existing"
+
+	defaultName = "default"
 )
 
 var (
@@ -137,7 +139,7 @@ func NewConfig() *config {
 	fs.Var(flags.NewURLsValue("http://localhost:2379,http://localhost:4001"), "listen-client-urls", "List of URLs to listen on for client traffic")
 	fs.UintVar(&cfg.maxSnapFiles, "max-snapshots", defaultMaxSnapshots, "Maximum number of snapshot files to retain (0 is unlimited)")
 	fs.UintVar(&cfg.maxWalFiles, "max-wals", defaultMaxWALs, "Maximum number of wal files to retain (0 is unlimited)")
-	fs.StringVar(&cfg.name, "name", "default", "Unique human-readable name for this node")
+	fs.StringVar(&cfg.name, "name", defaultName, "Unique human-readable name for this node")
 	fs.Uint64Var(&cfg.snapCount, "snapshot-count", etcdserver.DefaultSnapCount, "Number of committed transactions to trigger a snapshot")
 	fs.UintVar(&cfg.TickMs, "heartbeat-interval", 100, "Time (in milliseconds) of a heartbeat interval.")
 	fs.UintVar(&cfg.ElectionMs, "election-timeout", 1000, "Time (in milliseconds) for an election to timeout.")
@@ -153,7 +155,7 @@ func NewConfig() *config {
 	}
 	fs.StringVar(&cfg.dproxy, "discovery-proxy", "", "HTTP proxy to use for traffic to discovery service")
 	fs.StringVar(&cfg.dnsCluster, "discovery-srv", "", "DNS domain used to bootstrap initial cluster")
-	fs.StringVar(&cfg.initialCluster, "initial-cluster", "default=http://localhost:2380,default=http://localhost:7001", "Initial cluster configuration for bootstrapping")
+	fs.StringVar(&cfg.initialCluster, "initial-cluster", initialClusterFromName(defaultName), "Initial cluster configuration for bootstrapping")
 	fs.StringVar(&cfg.initialClusterToken, "initial-cluster-token", "etcd-cluster", "Initial cluster token for the etcd cluster during bootstrap")
 	fs.Var(cfg.clusterState, "initial-cluster-state", "Initial cluster configuration for bootstrapping")
 	if err := cfg.clusterState.Set(clusterStateFlagNew); err != nil {
@@ -172,9 +174,13 @@ func NewConfig() *config {
 	fs.StringVar(&cfg.clientTLSInfo.CAFile, "ca-file", "", "Path to the client server TLS CA file.")
 	fs.StringVar(&cfg.clientTLSInfo.CertFile, "cert-file", "", "Path to the client server TLS cert file.")
 	fs.StringVar(&cfg.clientTLSInfo.KeyFile, "key-file", "", "Path to the client server TLS key file.")
+	fs.BoolVar(&cfg.clientTLSInfo.ClientCertAuth, "client-cert-auth", false, "Enable client cert authentication.")
+	fs.StringVar(&cfg.clientTLSInfo.TrustedCAFile, "trusted-ca-file", "", "Path to the client server TLS trusted CA key file.")
 	fs.StringVar(&cfg.peerTLSInfo.CAFile, "peer-ca-file", "", "Path to the peer server TLS CA file.")
 	fs.StringVar(&cfg.peerTLSInfo.CertFile, "peer-cert-file", "", "Path to the peer server TLS cert file.")
 	fs.StringVar(&cfg.peerTLSInfo.KeyFile, "peer-key-file", "", "Path to the peer server TLS key file.")
+	fs.BoolVar(&cfg.peerTLSInfo.ClientCertAuth, "peer-client-cert-auth", false, "Enable peer client cert authentication.")
+	fs.StringVar(&cfg.peerTLSInfo.TrustedCAFile, "peer-trusted-ca-file", "", "Path to the peer server TLS trusted CA file.")
 
 	// unsafe
 	fs.BoolVar(&cfg.forceNewCluster, "force-new-cluster", false, "Force to create a new one member cluster")
@@ -206,6 +212,9 @@ func (cfg *config) Parse(arguments []string) error {
 	default:
 		os.Exit(2)
 	}
+	if len(cfg.FlagSet.Args()) != 0 {
+		return fmt.Errorf("'%s' is not a valid flag", cfg.FlagSet.Arg(0))
+	}
 
 	if cfg.printVersion {
 		fmt.Println("etcd version", version.Version)
@@ -231,11 +240,10 @@ func (cfg *config) Parse(arguments []string) error {
 		return ErrConflictBootstrapFlags
 	}
 
-	peerBindAddrFlag := "peer-bind-addr"
-	if !flags.IsSet(cfg.FlagSet, peerBindAddrFlag) {
-		peerBindAddrFlag = "peer-addr"
-	}
-	cfg.lpurls, err = flags.URLsFromFlags(cfg.FlagSet, "listen-peer-urls", peerBindAddrFlag, cfg.peerTLSInfo)
+	flags.SetBindAddrFromAddr(cfg.FlagSet, "peer-bind-addr", "peer-addr")
+	flags.SetBindAddrFromAddr(cfg.FlagSet, "bind-addr", "addr")
+
+	cfg.lpurls, err = flags.URLsFromFlags(cfg.FlagSet, "listen-peer-urls", "peer-bind-addr", cfg.peerTLSInfo)
 	if err != nil {
 		return err
 	}
@@ -243,11 +251,7 @@ func (cfg *config) Parse(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	bindAddrFlag := "bind-addr"
-	if !flags.IsSet(cfg.FlagSet, bindAddrFlag) {
-		bindAddrFlag = "addr"
-	}
-	cfg.lcurls, err = flags.URLsFromFlags(cfg.FlagSet, "listen-client-urls", bindAddrFlag, cfg.clientTLSInfo)
+	cfg.lcurls, err = flags.URLsFromFlags(cfg.FlagSet, "listen-client-urls", "bind-addr", cfg.clientTLSInfo)
 	if err != nil {
 		return err
 	}
@@ -260,7 +264,19 @@ func (cfg *config) Parse(arguments []string) error {
 		return errors.New("cannot resolve DNS hostnames.")
 	}
 
+	if 5*cfg.TickMs > cfg.ElectionMs {
+		return fmt.Errorf("-election-timeout[%vms] should be at least as 5 times as -heartbeat-interval[%vms]", cfg.ElectionMs, cfg.TickMs)
+	}
+
 	return nil
+}
+
+func initialClusterFromName(name string) string {
+	n := name
+	if name == "" {
+		n = defaultName
+	}
+	return fmt.Sprintf("%s=http://localhost:2380,%s=http://localhost:7001", n, n)
 }
 
 func (cfg *config) resolveUrls() error {

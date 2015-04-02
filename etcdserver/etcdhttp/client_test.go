@@ -1064,13 +1064,13 @@ func TestServeMembersFail(t *testing.T) {
 
 func TestWriteEvent(t *testing.T) {
 	// nil event should not panic
-	rw := httptest.NewRecorder()
-	writeKeyEvent(rw, nil, dummyRaftTimer{})
-	h := rw.Header()
+	rec := httptest.NewRecorder()
+	writeKeyEvent(rec, nil, dummyRaftTimer{})
+	h := rec.Header()
 	if len(h) > 0 {
 		t.Fatalf("unexpected non-empty headers: %#v", h)
 	}
-	b := rw.Body.String()
+	b := rec.Body.String()
 	if len(b) > 0 {
 		t.Fatalf("unexpected non-empty body: %q", b)
 	}
@@ -1138,7 +1138,7 @@ func TestV2DeprecatedMachinesEndpoint(t *testing.T) {
 		{"POST", http.StatusMethodNotAllowed},
 	}
 
-	m := NewClientHandler(&etcdserver.EtcdServer{Cluster: &etcdserver.Cluster{}})
+	m := &deprecatedMachinesHandler{clusterInfo: &etcdserver.Cluster{}}
 	s := httptest.NewServer(m)
 	defer s.Close()
 
@@ -1327,7 +1327,7 @@ func TestServeVersion(t *testing.T) {
 	if rw.Code != http.StatusOK {
 		t.Errorf("code=%d, want %d", rw.Code, http.StatusOK)
 	}
-	w := fmt.Sprintf(`{"releaseVersion":"%s","internalVersion":"%s"}`, version.Version, version.InternalVersion)
+	w := fmt.Sprintf("etcd %s", version.Version)
 	if g := rw.Body.String(); g != w {
 		t.Fatalf("body = %q, want %q", g, w)
 	}
