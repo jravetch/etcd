@@ -2,6 +2,7 @@ package rafthttp
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -81,11 +82,11 @@ func TestStreamWriterAttachBadOutgoingConn(t *testing.T) {
 }
 
 func TestStreamReaderDialRequest(t *testing.T) {
-	for i, tt := range []streamType{streamTypeMsgApp, streamTypeMessage} {
+	for i, tt := range []streamType{streamTypeMsgApp, streamTypeMessage, streamTypeMsgAppV2} {
 		tr := &roundTripperRecorder{}
 		sr := &streamReader{
 			tr:         tr,
-			picker:     mustNewURLPicker(t, []string{"http://localhost:7001"}),
+			picker:     mustNewURLPicker(t, []string{"http://localhost:2380"}),
 			t:          tt,
 			from:       types.ID(1),
 			to:         types.ID(2),
@@ -95,13 +96,7 @@ func TestStreamReaderDialRequest(t *testing.T) {
 		sr.dial()
 
 		req := tr.Request()
-		var wurl string
-		switch tt {
-		case streamTypeMsgApp:
-			wurl = "http://localhost:7001/raft/stream/1"
-		case streamTypeMessage:
-			wurl = "http://localhost:7001/raft/stream/message/1"
-		}
+		wurl := fmt.Sprintf("http://localhost:2380" + tt.endpoint() + "/1")
 		if req.URL.String() != wurl {
 			t.Errorf("#%d: url = %s, want %s", i, req.URL.String(), wurl)
 		}
@@ -138,7 +133,7 @@ func TestStreamReaderDialResult(t *testing.T) {
 		tr := newRespRoundTripper(tt.code, tt.err)
 		sr := &streamReader{
 			tr:     tr,
-			picker: mustNewURLPicker(t, []string{"http://localhost:7001"}),
+			picker: mustNewURLPicker(t, []string{"http://localhost:2380"}),
 			t:      streamTypeMessage,
 			from:   types.ID(1),
 			to:     types.ID(2),
@@ -188,6 +183,12 @@ func TestStream(t *testing.T) {
 		{
 			streamTypeMsgApp,
 			1,
+			msgapp,
+			recvc,
+		},
+		{
+			streamTypeMsgAppV2,
+			0,
 			msgapp,
 			recvc,
 		},

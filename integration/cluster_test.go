@@ -72,6 +72,14 @@ func testCluster(t *testing.T, size int) {
 	clusterMustProgress(t, c.Members)
 }
 
+func TestTLSClusterOf3(t *testing.T) {
+	defer afterTest(t)
+	c := NewTLSCluster(t, 3)
+	c.Launch(t)
+	defer c.Terminate(t)
+	clusterMustProgress(t, c.Members)
+}
+
 func TestClusterOf1UsingDiscovery(t *testing.T) { testClusterUsingDiscovery(t, 1) }
 func TestClusterOf3UsingDiscovery(t *testing.T) { testClusterUsingDiscovery(t, 3) }
 
@@ -95,6 +103,26 @@ func testClusterUsingDiscovery(t *testing.T, size int) {
 	clusterMustProgress(t, c.Members)
 }
 
+func TestTLSClusterOf3UsingDiscovery(t *testing.T) {
+	defer afterTest(t)
+	dc := NewCluster(t, 1)
+	dc.Launch(t)
+	defer dc.Terminate(t)
+	// init discovery token space
+	dcc := mustNewHTTPClient(t, dc.URLs())
+	dkapi := client.NewKeysAPI(dcc)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	if _, err := dkapi.Create(ctx, "/_config/size", fmt.Sprintf("%d", 3)); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	c := NewTLSClusterByDiscovery(t, 3, dc.URL(0)+"/v2/keys")
+	c.Launch(t)
+	defer c.Terminate(t)
+	clusterMustProgress(t, c.Members)
+}
+
 func TestDoubleClusterSizeOf1(t *testing.T) { testDoubleClusterSize(t, 1) }
 func TestDoubleClusterSizeOf3(t *testing.T) { testDoubleClusterSize(t, 3) }
 
@@ -106,6 +134,18 @@ func testDoubleClusterSize(t *testing.T, size int) {
 
 	for i := 0; i < size; i++ {
 		c.AddMember(t)
+	}
+	clusterMustProgress(t, c.Members)
+}
+
+func TestDoubleTLSClusterSizeOf3(t *testing.T) {
+	defer afterTest(t)
+	c := NewTLSCluster(t, 3)
+	c.Launch(t)
+	defer c.Terminate(t)
+
+	for i := 0; i < 3; i++ {
+		c.AddTLSMember(t)
 	}
 	clusterMustProgress(t, c.Members)
 }
@@ -203,8 +243,12 @@ type cluster struct {
 func fillClusterForMembers(ms []*member, cName string) error {
 	addrs := make([]string, 0)
 	for _, m := range ms {
+		scheme := "http"
+		if !m.PeerTLSInfo.Empty() {
+			scheme = "https"
+		}
 		for _, l := range m.PeerListeners {
-			addrs = append(addrs, fmt.Sprintf("%s=%s", m.Name, "http://"+l.Addr().String()))
+			addrs = append(addrs, fmt.Sprintf("%s=%s://%s", m.Name, scheme, l.Addr().String()))
 		}
 	}
 	clusterStr := strings.Join(addrs, ",")
@@ -218,13 +262,11 @@ func fillClusterForMembers(ms []*member, cName string) error {
 	return nil
 }
 
-// NewCluster returns an unlaunched cluster of the given size which has been
-// set to use static bootstrap.
-func NewCluster(t *testing.T, size int) *cluster {
+func newCluster(t *testing.T, size int, usePeerTLS bool) *cluster {
 	c := &cluster{}
 	ms := make([]*member, size)
 	for i := 0; i < size; i++ {
-		ms[i] = mustNewMember(t, c.name(i))
+		ms[i] = mustNewMember(t, c.name(i), usePeerTLS)
 	}
 	c.Members = ms
 	if err := fillClusterForMembers(c.Members, clusterName); err != nil {
@@ -234,17 +276,35 @@ func NewCluster(t *testing.T, size int) *cluster {
 	return c
 }
 
-// NewClusterUsingDiscovery returns an unlaunched cluster of the given size
-// which has been set to use the given url as discovery service to bootstrap.
-func NewClusterByDiscovery(t *testing.T, size int, url string) *cluster {
+func newClusterByDiscovery(t *testing.T, size int, usePeerTLS bool, url string) *cluster {
 	c := &cluster{}
 	ms := make([]*member, size)
 	for i := 0; i < size; i++ {
-		ms[i] = mustNewMember(t, c.name(i))
+		ms[i] = mustNewMember(t, c.name(i), usePeerTLS)
 		ms[i].DiscoveryURL = url
 	}
 	c.Members = ms
 	return c
+}
+
+// NewCluster returns an unlaunched cluster of the given size which has been
+// set to use static bootstrap.
+func NewCluster(t *testing.T, size int) *cluster {
+	return newCluster(t, size, false)
+}
+
+// NewClusterUsingDiscovery returns an unlaunched cluster of the given size
+// which has been set to use the given url as discovery service to bootstrap.
+func NewClusterByDiscovery(t *testing.T, size int, url string) *cluster {
+	return newClusterByDiscovery(t, size, false, url)
+}
+
+func NewTLSCluster(t *testing.T, size int) *cluster {
+	return newCluster(t, size, true)
+}
+
+func NewTLSClusterByDiscovery(t *testing.T, size int, url string) *cluster {
+	return newClusterByDiscovery(t, size, true, url)
 }
 
 func (c *cluster) Launch(t *testing.T) {
@@ -282,9 +342,13 @@ func (c *cluster) URLs() []string {
 func (c *cluster) HTTPMembers() []client.Member {
 	ms := make([]client.Member, len(c.Members))
 	for i, m := range c.Members {
+		scheme := "http"
+		if !m.PeerTLSInfo.Empty() {
+			scheme = "https"
+		}
 		ms[i].Name = m.Name
 		for _, ln := range m.PeerListeners {
-			ms[i].PeerURLs = append(ms[i].PeerURLs, "http://"+ln.Addr().String())
+			ms[i].PeerURLs = append(ms[i].PeerURLs, scheme+"://"+ln.Addr().String())
 		}
 		for _, ln := range m.ClientListeners {
 			ms[i].ClientURLs = append(ms[i].ClientURLs, "http://"+ln.Addr().String())
@@ -293,16 +357,20 @@ func (c *cluster) HTTPMembers() []client.Member {
 	return ms
 }
 
-func (c *cluster) AddMember(t *testing.T) {
+func (c *cluster) addMember(t *testing.T, usePeerTLS bool) {
 	clusterStr := c.Members[0].Cluster.String()
 	idx := len(c.Members)
-	m := mustNewMember(t, c.name(idx))
+	m := mustNewMember(t, c.name(idx), usePeerTLS)
+	scheme := "http"
+	if usePeerTLS {
+		scheme = "https"
+	}
 
 	// send add request to the cluster
 	cc := mustNewHTTPClient(t, []string{c.URL(0)})
 	ma := client.NewMembersAPI(cc)
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	peerURL := "http://" + m.PeerListeners[0].Addr().String()
+	peerURL := scheme + "://" + m.PeerListeners[0].Addr().String()
 	if _, err := ma.Add(ctx, peerURL); err != nil {
 		t.Fatalf("add member on %s error: %v", c.URL(0), err)
 	}
@@ -313,7 +381,7 @@ func (c *cluster) AddMember(t *testing.T) {
 	c.waitMembersMatch(t, members)
 
 	for _, ln := range m.PeerListeners {
-		clusterStr += fmt.Sprintf(",%s=http://%s", m.Name, ln.Addr().String())
+		clusterStr += fmt.Sprintf(",%s=%s://%s", m.Name, scheme, ln.Addr().String())
 	}
 	var err error
 	m.Cluster, err = etcdserver.NewClusterFromString(clusterName, clusterStr)
@@ -327,6 +395,14 @@ func (c *cluster) AddMember(t *testing.T) {
 	c.Members = append(c.Members, m)
 	// wait cluster to be stable to receive future client requests
 	c.waitMembersMatch(t, c.HTTPMembers())
+}
+
+func (c *cluster) AddMember(t *testing.T) {
+	c.addMember(t, false)
+}
+
+func (c *cluster) AddTLSMember(t *testing.T) {
+	c.addMember(t, true)
 }
 
 func (c *cluster) RemoveMember(t *testing.T, id uint64) {
@@ -445,21 +521,42 @@ func newListenerWithAddr(t *testing.T, addr string) net.Listener {
 type member struct {
 	etcdserver.ServerConfig
 	PeerListeners, ClientListeners []net.Listener
+	// inited PeerTLSInfo implies to enable peer TLS
+	PeerTLSInfo transport.TLSInfo
 
 	raftHandler *testutil.PauseableHandler
 	s           *etcdserver.EtcdServer
 	hss         []*httptest.Server
 }
 
-func mustNewMember(t *testing.T, name string) *member {
-	var err error
+// mustNewMember return an inited member with the given name. If usePeerTLS is
+// true, it will set PeerTLSInfo and use https scheme to communicate between
+// peers.
+func mustNewMember(t *testing.T, name string, usePeerTLS bool) *member {
+	var (
+		testTLSInfo = transport.TLSInfo{
+			KeyFile:        "./fixtures/server.key.insecure",
+			CertFile:       "./fixtures/server.crt",
+			TrustedCAFile:  "./fixtures/ca.crt",
+			ClientCertAuth: true,
+		}
+		err error
+	)
 	m := &member{}
+
+	peerScheme := "http"
+	if usePeerTLS {
+		peerScheme = "https"
+	}
 
 	pln := newLocalListener(t)
 	m.PeerListeners = []net.Listener{pln}
-	m.PeerURLs, err = types.NewURLs([]string{"http://" + pln.Addr().String()})
+	m.PeerURLs, err = types.NewURLs([]string{peerScheme + "://" + pln.Addr().String()})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if usePeerTLS {
+		m.PeerTLSInfo = testTLSInfo
 	}
 
 	cln := newLocalListener(t)
@@ -475,13 +572,13 @@ func mustNewMember(t *testing.T, name string) *member {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clusterStr := fmt.Sprintf("%s=http://%s", name, pln.Addr().String())
+	clusterStr := fmt.Sprintf("%s=%s://%s", name, peerScheme, pln.Addr().String())
 	m.Cluster, err = etcdserver.NewClusterFromString(clusterName, clusterStr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.NewCluster = true
-	m.Transport = mustNewTransport(t)
+	m.Transport = mustNewTransport(t, m.PeerTLSInfo)
 	m.ElectionTicks = electionTicks
 	m.TickMs = uint(tickDuration / time.Millisecond)
 	return m
@@ -512,8 +609,9 @@ func (m *member) Clone(t *testing.T) *member {
 		// this should never fail
 		panic(err)
 	}
-	mm.Transport = mustNewTransport(t)
+	mm.Transport = mustNewTransport(t, m.PeerTLSInfo)
 	mm.ElectionTicks = m.ElectionTicks
+	mm.PeerTLSInfo = m.PeerTLSInfo
 	return mm
 }
 
@@ -534,7 +632,15 @@ func (m *member) Launch() error {
 			Listener: ln,
 			Config:   &http.Server{Handler: m.raftHandler},
 		}
-		hs.Start()
+		if m.PeerTLSInfo.Empty() {
+			hs.Start()
+		} else {
+			hs.TLS, err = m.PeerTLSInfo.ServerConfig()
+			if err != nil {
+				return err
+			}
+			hs.StartTLS()
+		}
 		m.hss = append(m.hss, hs)
 	}
 	for _, ln := range m.ClientListeners {
@@ -616,7 +722,7 @@ func (m *member) Terminate(t *testing.T) {
 }
 
 func mustNewHTTPClient(t *testing.T, eps []string) client.Client {
-	cfg := client.Config{Transport: mustNewTransport(t), Endpoints: eps}
+	cfg := client.Config{Transport: mustNewTransport(t, transport.TLSInfo{}), Endpoints: eps}
 	c, err := client.New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -624,8 +730,8 @@ func mustNewHTTPClient(t *testing.T, eps []string) client.Client {
 	return c
 }
 
-func mustNewTransport(t *testing.T) *http.Transport {
-	tr, err := transport.NewTimeoutTransport(transport.TLSInfo{}, rafthttp.DialTimeout, rafthttp.ConnReadTimeout, rafthttp.ConnWriteTimeout)
+func mustNewTransport(t *testing.T, tlsInfo transport.TLSInfo) *http.Transport {
+	tr, err := transport.NewTimeoutTransport(tlsInfo, rafthttp.DialTimeout, rafthttp.ConnReadTimeout, rafthttp.ConnWriteTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}

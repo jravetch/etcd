@@ -12,34 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package etcdmain
+package runtime
 
 import (
-	"testing"
-
-	"github.com/coreos/etcd/pkg/testutil"
+	"io/ioutil"
+	"syscall"
 )
 
-func TestGenClusterString(t *testing.T) {
-	tests := []struct {
-		token string
-		urls  []string
-		wstr  string
-	}{
-		{
-			"default", []string{"http://127.0.0.1:2379"},
-			"default=http://127.0.0.1:2379",
-		},
-		{
-			"node1", []string{"http://0.0.0.0:2379", "http://1.1.1.1:2379"},
-			"node1=http://0.0.0.0:2379,node1=http://1.1.1.1:2379",
-		},
+func FDLimit() (uint64, error) {
+	var rlimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit); err != nil {
+		return 0, err
 	}
-	for i, tt := range tests {
-		urls := testutil.MustNewURLs(t, tt.urls)
-		str := genClusterString(tt.token, urls)
-		if str != tt.wstr {
-			t.Errorf("#%d: cluster = %s, want %s", i, str, tt.wstr)
-		}
+	return rlimit.Cur, nil
+}
+
+func FDUsage() (uint64, error) {
+	fds, err := ioutil.ReadDir("/proc/self/fd")
+	if err != nil {
+		return 0, err
 	}
+	return uint64(len(fds)), nil
 }

@@ -11,17 +11,20 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package coreos
+
+// +build !linux
+
+package runtime
 
 import (
-	"io/ioutil"
-	"strings"
+	"fmt"
+	"runtime"
 )
 
-func IsCoreOS() bool {
-	b, err := ioutil.ReadFile("/usr/lib/os-release")
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(b), "ID=coreos")
+func FDLimit() (uint64, error) {
+	return 0, fmt.Errorf("cannot get FDLimit on %s", runtime.GOOS)
+}
+
+func FDUsage() (uint64, error) {
+	return 0, fmt.Errorf("cannot get FDUsage on %s", runtime.GOOS)
 }

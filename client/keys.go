@@ -106,6 +106,9 @@ type KeysAPI interface {
 	// Create is an alias for Set w/ PrevExist=false
 	Create(ctx context.Context, key, value string) (*Response, error)
 
+	// CreateInOrder is used to atomically create in-order keys within the given directory.
+	CreateInOrder(ctx context.Context, dir, value string, opts *CreateInOrderOptions) (*Response, error)
+
 	// Update is an alias for Set w/ PrevExist=true
 	Update(ctx context.Context, key, value string) (*Response, error)
 
@@ -131,6 +134,14 @@ type WatcherOptions struct {
 	// to false (default), events will be limited to those that
 	// occur for the exact key.
 	Recursive bool
+}
+
+type CreateInOrderOptions struct {
+	// TTL defines a period of time after-which the Node should
+	// expire and no longer exist. Values <= 0 are ignored. Given
+	// that the zero-value is ignored, TTL cannot be used to set
+	// a TTL of 0.
+	TTL time.Duration
 }
 
 type SetOptions struct {
@@ -234,6 +245,9 @@ type Node struct {
 	// Key represents the unique location of this Node (e.g. "/foo/bar").
 	Key string `json:"key"`
 
+	// Dir reports whether node describes a directory.
+	Dir bool `json:"dir,omitempty"`
+
 	// Value is the current data stored on this Node. If this Node
 	// is a directory, Value will be empty.
 	Value string `json:"value"`
@@ -248,10 +262,16 @@ type Node struct {
 
 	// ModifiedIndex is the etcd index at-which this Node was last modified.
 	ModifiedIndex uint64 `json:"modifiedIndex"`
+
+	// Expiration is the server side expiration time of the key.
+	Expiration *time.Time `json:"expiration,omitempty"`
+
+	// TTL is the time to live of the key in second.
+	TTL int64 `json:"ttl,omitempty"`
 }
 
 func (n *Node) String() string {
-	return fmt.Sprintf("{Key: %s, CreatedIndex: %d, ModifiedIndex: %d}", n.Key, n.CreatedIndex, n.ModifiedIndex)
+	return fmt.Sprintf("{Key: %s, CreatedIndex: %d, ModifiedIndex: %d, TTL: %d}", n.Key, n.CreatedIndex, n.ModifiedIndex, n.TTL)
 }
 
 type httpKeysAPI struct {
@@ -283,6 +303,25 @@ func (k *httpKeysAPI) Set(ctx context.Context, key, val string, opts *SetOptions
 
 func (k *httpKeysAPI) Create(ctx context.Context, key, val string) (*Response, error) {
 	return k.Set(ctx, key, val, &SetOptions{PrevExist: PrevNoExist})
+}
+
+func (k *httpKeysAPI) CreateInOrder(ctx context.Context, dir, val string, opts *CreateInOrderOptions) (*Response, error) {
+	act := &createInOrderAction{
+		Prefix: k.prefix,
+		Dir:    dir,
+		Value:  val,
+	}
+
+	if opts != nil {
+		act.TTL = opts.TTL
+	}
+
+	resp, body, err := k.client.Do(ctx, act)
+	if err != nil {
+		return nil, err
+	}
+
+	return unmarshalHTTPResponse(resp.StatusCode, resp.Header, body)
 }
 
 func (k *httpKeysAPI) Update(ctx context.Context, key, val string) (*Response, error) {
@@ -480,6 +519,28 @@ func (a *deleteAction) HTTPRequest(ep url.URL) *http.Request {
 	req, _ := http.NewRequest("DELETE", u.String(), nil)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
+	return req
+}
+
+type createInOrderAction struct {
+	Prefix string
+	Dir    string
+	Value  string
+	TTL    time.Duration
+}
+
+func (a *createInOrderAction) HTTPRequest(ep url.URL) *http.Request {
+	u := v2KeysURL(ep, a.Prefix, a.Dir)
+
+	form := url.Values{}
+	form.Add("value", a.Value)
+	if a.TTL > 0 {
+		form.Add("ttl", strconv.FormatUint(uint64(a.TTL.Seconds()), 10))
+	}
+	body := strings.NewReader(form.Encode())
+
+	req, _ := http.NewRequest("POST", u.String(), body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return req
 }
 

@@ -26,6 +26,7 @@ func NewImportSnapCommand() cli.Command {
 		Usage: "import a snapshot to a cluster",
 		Flags: []cli.Flag{
 			cli.StringFlag{Name: "snap", Value: "", Usage: "Path to the vaild etcd 0.4.x snapshot."},
+			cli.StringSliceFlag{Name: "hidden", Value: new(cli.StringSlice), Usage: "Hidden key spaces to import from snapshot"},
 			cli.IntFlag{Name: "c", Value: 10, Usage: "Number of concurrent clients to import the data"},
 		},
 		Action: handleImportSnap,
@@ -36,7 +37,7 @@ func handleImportSnap(c *cli.Context) {
 	d, err := ioutil.ReadFile(c.String("snap"))
 	if err != nil {
 		if c.String("snap") == "" {
-			fmt.Printf("no snapshot file provided (use --snap)")
+			fmt.Printf("no snapshot file provided (use --snap)\n")
 		} else {
 			fmt.Printf("cannot read snapshot file %s\n", c.String("snap"))
 		}
@@ -83,6 +84,15 @@ func handleImportSnap(c *cli.Context) {
 		handleError(ErrorFromEtcd, err)
 	}
 	n := copyKeys(all.Node, setc)
+
+	hiddens := c.StringSlice("hidden")
+	for _, h := range hiddens {
+		allh, err := st.Get(h, true, true)
+		if err != nil {
+			handleError(ErrorFromEtcd, err)
+		}
+		n += copyKeys(allh.Node, setc)
+	}
 	close(setc)
 	wg.Wait()
 	fmt.Printf("finished importing %d keys\n", n)

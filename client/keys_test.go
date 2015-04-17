@@ -345,6 +345,107 @@ func TestSetAction(t *testing.T) {
 	}
 }
 
+func TestCreateInOrderAction(t *testing.T) {
+	wantHeader := http.Header(map[string][]string{
+		"Content-Type": []string{"application/x-www-form-urlencoded"},
+	})
+
+	tests := []struct {
+		act      createInOrderAction
+		wantURL  string
+		wantBody string
+	}{
+		// default prefix
+		{
+			act: createInOrderAction{
+				Prefix: defaultV2KeysPrefix,
+				Dir:    "foo",
+			},
+			wantURL:  "http://example.com/v2/keys/foo",
+			wantBody: "value=",
+		},
+
+		// non-default prefix
+		{
+			act: createInOrderAction{
+				Prefix: "/pfx",
+				Dir:    "foo",
+			},
+			wantURL:  "http://example.com/pfx/foo",
+			wantBody: "value=",
+		},
+
+		// no prefix
+		{
+			act: createInOrderAction{
+				Dir: "foo",
+			},
+			wantURL:  "http://example.com/foo",
+			wantBody: "value=",
+		},
+
+		// Key with path separators
+		{
+			act: createInOrderAction{
+				Prefix: defaultV2KeysPrefix,
+				Dir:    "foo/bar/baz",
+			},
+			wantURL:  "http://example.com/v2/keys/foo/bar/baz",
+			wantBody: "value=",
+		},
+
+		// Key with leading slash, Prefix with trailing slash
+		{
+			act: createInOrderAction{
+				Prefix: "/foo/",
+				Dir:    "/bar",
+			},
+			wantURL:  "http://example.com/foo/bar",
+			wantBody: "value=",
+		},
+
+		// Key with trailing slash
+		{
+			act: createInOrderAction{
+				Dir: "/foo/",
+			},
+			wantURL:  "http://example.com/foo",
+			wantBody: "value=",
+		},
+
+		// Value is set
+		{
+			act: createInOrderAction{
+				Dir:   "foo",
+				Value: "baz",
+			},
+			wantURL:  "http://example.com/foo",
+			wantBody: "value=baz",
+		},
+		// TTL is set
+		{
+			act: createInOrderAction{
+				Dir: "foo",
+				TTL: 3 * time.Minute,
+			},
+			wantURL:  "http://example.com/foo",
+			wantBody: "ttl=180&value=",
+		},
+	}
+
+	for i, tt := range tests {
+		u, err := url.Parse(tt.wantURL)
+		if err != nil {
+			t.Errorf("#%d: unable to use wantURL fixture: %v", i, err)
+		}
+
+		got := tt.act.HTTPRequest(url.URL{Scheme: "http", Host: "example.com"})
+		if err := assertRequest(*got, "POST", u, wantHeader, []byte(tt.wantBody)); err != nil {
+			t.Errorf("#%d: %v", i, err)
+		}
+	}
+}
+
 func TestDeleteAction(t *testing.T) {
 	wantHeader := http.Header(map[string][]string{
 		"Content-Type": []string{"application/x-www-form-urlencoded"},
@@ -483,6 +584,9 @@ func assertRequest(got http.Request, wantMethod string, wantURL *url.URL, wantHe
 }
 
 func TestUnmarshalSuccessfulResponse(t *testing.T) {
+	var expiration time.Time
+	expiration.UnmarshalText([]byte("2015-04-07T04:40:23.044979686Z"))
+
 	tests := []struct {
 		hdr     string
 		body    string
@@ -518,13 +622,33 @@ func TestUnmarshalSuccessfulResponse(t *testing.T) {
 		// Node
 		{
 			hdr:  "15",
-			body: `{"action":"get", "node": {"key": "/foo", "value": "bar", "modifiedIndex": 12, "createdIndex": 10}}`,
+			body: `{"action":"get", "node": {"key": "/foo", "value": "bar", "modifiedIndex": 12, "createdIndex": 10, "ttl": 10, "expiration": "2015-04-07T04:40:23.044979686Z"}}`,
 			wantRes: &Response{
 				Action: "get",
 				Index:  15,
 				Node: &Node{
 					Key:           "/foo",
 					Value:         "bar",
+					ModifiedIndex: 12,
+					CreatedIndex:  10,
+					TTL:           10,
+					Expiration:    &expiration,
+				},
+				PrevNode: nil,
+			},
+			wantErr: false,
+		},
+
+		// Node Dir
+		{
+			hdr:  "15",
+			body: `{"action":"get", "node": {"key": "/foo", "dir": true, "modifiedIndex": 12, "createdIndex": 10}}`,
+			wantRes: &Response{
+				Action: "get",
+				Index:  15,
+				Node: &Node{
+					Key:           "/foo",
+					Dir:           true,
 					ModifiedIndex: 12,
 					CreatedIndex:  10,
 				},
@@ -799,7 +923,7 @@ func TestHTTPKeysAPIWatcherAction(t *testing.T) {
 	}
 }
 
-func TestHTTPKeysAPISetAction(t *testing.T) {
+func TestHTTPKeysAPIcreateInOrderAction(t *testing.T) {
 	tests := []struct {
 		key        string
 		value      string
@@ -1164,6 +1288,16 @@ func TestHTTPKeysAPICreateAction(t *testing.T) {
 
 	kAPI := httpKeysAPI{client: &actionAssertingHTTPClient{t: t, act: act}}
 	kAPI.Create(context.Background(), "/foo", "bar")
+}
+
+func TestHTTPKeysAPICreateInOrderAction(t *testing.T) {
+	act := &createInOrderAction{
+		Dir:   "/foo",
+		Value: "bar",
+		TTL:   0,
+	}
+	kAPI := httpKeysAPI{client: &actionAssertingHTTPClient{t: t, act: act}}
+	kAPI.CreateInOrder(context.Background(), "/foo", "bar", nil)
 }
 
 func TestHTTPKeysAPIUpdateAction(t *testing.T) {

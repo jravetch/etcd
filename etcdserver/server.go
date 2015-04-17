@@ -16,6 +16,7 @@ package etcdserver
 
 import (
 	"encoding/json"
+	"expvar"
 	"fmt"
 	"log"
 	"math/rand"
@@ -33,6 +34,7 @@ import (
 	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/coreos/etcd/pkg/idutil"
 	"github.com/coreos/etcd/pkg/pbutil"
+	"github.com/coreos/etcd/pkg/runtime"
 	"github.com/coreos/etcd/pkg/timeutil"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/pkg/wait"
@@ -69,6 +71,16 @@ var (
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+
+	expvar.Publish(
+		"file_descriptor_limit",
+		expvar.Func(
+			func() interface{} {
+				n, _ := runtime.FDLimit()
+				return n
+			},
+		),
+	)
 }
 
 type Response struct {
@@ -271,6 +283,7 @@ func (s *EtcdServer) Start() {
 	s.start()
 	go s.publish(defaultPublishRetryInterval)
 	go s.purgeFile()
+	go monitorFileDescriptor(s.done)
 }
 
 // start prepares and starts server in a new goroutine. It is no longer safe to
@@ -637,9 +650,9 @@ func (s *EtcdServer) publish(retryInterval time.Duration) {
 }
 
 func (s *EtcdServer) send(ms []raftpb.Message) {
-	for _, m := range ms {
-		if !s.Cluster.IsIDRemoved(types.ID(m.To)) {
-			m.To = 0
+	for i, _ := range ms {
+		if s.Cluster.IsIDRemoved(types.ID(ms[i].To)) {
+			ms[i].To = 0
 		}
 	}
 	s.r.transport.Send(ms)
@@ -689,7 +702,11 @@ func (s *EtcdServer) applyRequest(r pb.Request) Response {
 		switch {
 		case existsSet:
 			if exists {
-				return f(s.store.Update(r.Path, r.Val, expr))
+				if r.PrevIndex == 0 && r.PrevValue == "" {
+					return f(s.store.Update(r.Path, r.Val, expr))
+				} else {
+					return f(s.store.CompareAndSwap(r.Path, r.PrevValue, r.PrevIndex, r.Val, expr))
+				}
 			}
 			return f(s.store.Create(r.Path, r.Dir, r.Val, false, expr))
 		case r.PrevIndex > 0 || r.PrevValue != "":
