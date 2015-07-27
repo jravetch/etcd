@@ -31,7 +31,7 @@ If you run etcd 2.0 on an etcd 0.4 data directory it will automatically migrate 
 You will want to coordinate this upgrade by walking through each of your machines in the cluster, stopping etcd 0.4 and then starting etcd 2.0.
 If you would rather manually do the migration, to test it out first in another environment, you can use the [migration tool doc][migrationtooldoc].
 
-[migrationtooldoc]: ../tools/etcd-migrate/README.md
+[migrationtooldoc]: https://github.com/coreos/etcd/blob/master/tools/etcd-migrate/README.md
 
 ## Snapshot Migration
 
@@ -79,7 +79,7 @@ The consistent read guarantees the sequential consistency within one client that
 
 Each etcd member will proxy the request to leader and only return the result to user after the result is applied on the local member. Thus after the write succeed, the user is guaranteed to see the value on the member it sent the request to.
 
-Reads do not provide linearizability. If you want linearizabilable read, you need to set quorum option to true.
+Reads do not provide linearizability. If you want linearizable read, you need to set quorum option to true.
 
 **Previous behavior**
 
@@ -94,21 +94,21 @@ Standby mode was intended for large clusters that had a subset of the members ac
 
 Proxy mode in 2.0 will provide similar functionality, and with improved control over which machines act as proxies due to the operator specifically configuring them. Proxies also support read only or read/write modes for increased security and durability.
 
-[proxymode]: https://github.com/coreos/etcd/blob/master/Documentation/proxy.md
+[proxymode]: proxy.md
 
 ## Discovery Service
 
 A size key needs to be provided inside a [discovery token][discoverytoken].
-[discoverytoken]: https://github.com/coreos/etcd/blob/master/Documentation/clustering.md#custom-etcd-discovery-service
+[discoverytoken]: clustering.md#custom-etcd-discovery-service
 
 ## HTTP Admin API
 
 `v2/admin` on peer url and `v2/keys/_etcd` are unified under the new [v2/member API][memberapi] to better explain which machines are part of an etcd cluster, and to simplify the keyspace for all your use cases.
 
-[memberapi]: https://github.com/coreos/etcd/blob/master/Documentation/other_apis.md
+[memberapi]: other_apis.md
 
 ## HTTP Key Value API
-- The follower can now transparently proxy write equests to the leader. Clients will no longer see 307 redirections to the leader from etcd.
+- The follower can now transparently proxy write requests to the leader. Clients will no longer see 307 redirections to the leader from etcd.
 
 - Expiration time is in UTC instead of local time.
 

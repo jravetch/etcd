@@ -16,6 +16,7 @@ package command
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -23,7 +24,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/bgentry/speakeasy"
 	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/codegangsta/cli"
+	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
+	"github.com/coreos/etcd/client"
 	"github.com/coreos/etcd/pkg/transport"
 )
 
@@ -65,14 +69,46 @@ func getPeersFlagValue(c *cli.Context) []string {
 
 	// If we still don't have peers, use a default
 	if peerstr == "" {
-		peerstr = "127.0.0.1:4001,127.0.0.1:2379"
+		peerstr = "http://127.0.0.1:4001,http://127.0.0.1:2379"
 	}
 
 	return strings.Split(peerstr, ",")
 }
 
+func getDomainDiscoveryFlagValue(c *cli.Context) ([]string, error) {
+	domainstr := c.GlobalString("discovery-srv")
+
+	// Use an environment variable if nothing was supplied on the
+	// command line
+	if domainstr == "" {
+		domainstr = os.Getenv("ETCDCTL_DISCOVERY_SRV")
+	}
+
+	// If we still don't have domain discovery, return nothing
+	if domainstr == "" {
+		return []string{}, nil
+	}
+
+	discoverer := client.NewSRVDiscover()
+	eps, err := discoverer.Discover(domainstr)
+	if err != nil {
+		return nil, err
+	}
+
+	return eps, err
+}
+
 func getEndpoints(c *cli.Context) ([]string, error) {
-	eps := getPeersFlagValue(c)
+	eps, err := getDomainDiscoveryFlagValue(c)
+	if err != nil {
+		return nil, err
+	}
+
+	// If domain discovery returns no endpoints, check peer flag
+	if len(eps) == 0 {
+		eps = getPeersFlagValue(c)
+	}
+
 	for i, ep := range eps {
 		u, err := url.Parse(ep)
 		if err != nil {
@@ -85,6 +121,7 @@ func getEndpoints(c *cli.Context) ([]string, error) {
 
 		eps[i] = u.String()
 	}
+
 	return eps, nil
 }
 
@@ -111,5 +148,81 @@ func getTransport(c *cli.Context) (*http.Transport, error) {
 		KeyFile:  keyfile,
 	}
 	return transport.NewTransport(tls)
+}
 
+func getUsernamePasswordFromFlag(usernameFlag string) (username string, password string, err error) {
+	colon := strings.Index(usernameFlag, ":")
+	if colon == -1 {
+		username = usernameFlag
+		// Prompt for the password.
+		password, err = speakeasy.Ask("Password: ")
+		if err != nil {
+			return "", "", err
+		}
+	} else {
+		username = usernameFlag[:colon]
+		password = usernameFlag[colon+1:]
+	}
+	return username, password, nil
+}
+
+func mustNewKeyAPI(c *cli.Context) client.KeysAPI {
+	return client.NewKeysAPI(mustNewClient(c))
+}
+
+func mustNewMembersAPI(c *cli.Context) client.MembersAPI {
+	return client.NewMembersAPI(mustNewClient(c))
+}
+
+func mustNewClient(c *cli.Context) client.Client {
+	eps, err := getEndpoints(c)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+
+	tr, err := getTransport(c)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+
+	cfg := client.Config{
+		Transport: tr,
+		Endpoints: eps,
+	}
+
+	uFlag := c.GlobalString("username")
+	if uFlag != "" {
+		username, password, err := getUsernamePasswordFromFlag(uFlag)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
+		cfg.Username = username
+		cfg.Password = password
+	}
+
+	hc, err := client.New(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+
+	if !c.GlobalBool("no-sync") {
+		ctx, cancel := context.WithTimeout(context.Background(), client.DefaultRequestTimeout)
+		err := hc.Sync(ctx)
+		cancel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
+	}
+
+	if c.GlobalBool("debug") {
+		fmt.Fprintf(os.Stderr, "Cluster-Endpoints: %s\n", strings.Join(hc.Endpoints(), ", "))
+		client.EnablecURLDebug()
+	}
+
+	return hc
 }

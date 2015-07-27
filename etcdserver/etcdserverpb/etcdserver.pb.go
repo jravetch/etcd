@@ -7,6 +7,7 @@
 
 	It is generated from these files:
 		etcdserver.proto
+		rpc.proto
 
 	It has these top-level messages:
 		Request
@@ -21,29 +22,28 @@ import math "math"
 
 import io "io"
 import fmt "fmt"
-import github_com_gogo_protobuf_proto "github.com/coreos/etcd/Godeps/_workspace/src/github.com/gogo/protobuf/proto"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
 var _ = math.Inf
 
 type Request struct {
-	ID               uint64 `protobuf:"varint,1,req" json:"ID"`
-	Method           string `protobuf:"bytes,2,req" json:"Method"`
-	Path             string `protobuf:"bytes,3,req" json:"Path"`
-	Val              string `protobuf:"bytes,4,req" json:"Val"`
-	Dir              bool   `protobuf:"varint,5,req" json:"Dir"`
-	PrevValue        string `protobuf:"bytes,6,req" json:"PrevValue"`
-	PrevIndex        uint64 `protobuf:"varint,7,req" json:"PrevIndex"`
-	PrevExist        *bool  `protobuf:"varint,8,req" json:"PrevExist,omitempty"`
-	Expiration       int64  `protobuf:"varint,9,req" json:"Expiration"`
-	Wait             bool   `protobuf:"varint,10,req" json:"Wait"`
-	Since            uint64 `protobuf:"varint,11,req" json:"Since"`
-	Recursive        bool   `protobuf:"varint,12,req" json:"Recursive"`
-	Sorted           bool   `protobuf:"varint,13,req" json:"Sorted"`
-	Quorum           bool   `protobuf:"varint,14,req" json:"Quorum"`
-	Time             int64  `protobuf:"varint,15,req" json:"Time"`
-	Stream           bool   `protobuf:"varint,16,req" json:"Stream"`
+	ID               uint64 `protobuf:"varint,1,opt" json:"ID"`
+	Method           string `protobuf:"bytes,2,opt" json:"Method"`
+	Path             string `protobuf:"bytes,3,opt" json:"Path"`
+	Val              string `protobuf:"bytes,4,opt" json:"Val"`
+	Dir              bool   `protobuf:"varint,5,opt" json:"Dir"`
+	PrevValue        string `protobuf:"bytes,6,opt" json:"PrevValue"`
+	PrevIndex        uint64 `protobuf:"varint,7,opt" json:"PrevIndex"`
+	PrevExist        *bool  `protobuf:"varint,8,opt" json:"PrevExist,omitempty"`
+	Expiration       int64  `protobuf:"varint,9,opt" json:"Expiration"`
+	Wait             bool   `protobuf:"varint,10,opt" json:"Wait"`
+	Since            uint64 `protobuf:"varint,11,opt" json:"Since"`
+	Recursive        bool   `protobuf:"varint,12,opt" json:"Recursive"`
+	Sorted           bool   `protobuf:"varint,13,opt" json:"Sorted"`
+	Quorum           bool   `protobuf:"varint,14,opt" json:"Quorum"`
+	Time             int64  `protobuf:"varint,15,opt" json:"Time"`
+	Stream           bool   `protobuf:"varint,16,opt" json:"Stream"`
 	XXX_unrecognized []byte `json:"-"`
 }
 
@@ -52,8 +52,8 @@ func (m *Request) String() string { return proto.CompactTextString(m) }
 func (*Request) ProtoMessage()    {}
 
 type Metadata struct {
-	NodeID           uint64 `protobuf:"varint,1,req" json:"NodeID"`
-	ClusterID        uint64 `protobuf:"varint,2,req" json:"ClusterID"`
+	NodeID           uint64 `protobuf:"varint,1,opt" json:"NodeID"`
+	ClusterID        uint64 `protobuf:"varint,2,opt" json:"ClusterID"`
 	XXX_unrecognized []byte `json:"-"`
 }
 
@@ -65,15 +65,15 @@ func init() {
 }
 func (m *Request) Unmarshal(data []byte) error {
 	l := len(data)
-	index := 0
-	for index < l {
+	iNdEx := 0
+	for iNdEx < l {
 		var wire uint64
 		for shift := uint(0); ; shift += 7 {
-			if index >= l {
+			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[index]
-			index++
+			b := data[iNdEx]
+			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
@@ -87,11 +87,11 @@ func (m *Request) Unmarshal(data []byte) error {
 				return fmt.Errorf("proto: wrong wireType = %d for field ID", wireType)
 			}
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				m.ID |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -103,77 +103,77 @@ func (m *Request) Unmarshal(data []byte) error {
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
-			postIndex := index + int(stringLen)
+			postIndex := iNdEx + int(stringLen)
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Method = string(data[index:postIndex])
-			index = postIndex
+			m.Method = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
 		case 3:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Path", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
-			postIndex := index + int(stringLen)
+			postIndex := iNdEx + int(stringLen)
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Path = string(data[index:postIndex])
-			index = postIndex
+			m.Path = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
 		case 4:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Val", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
-			postIndex := index + int(stringLen)
+			postIndex := iNdEx + int(stringLen)
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Val = string(data[index:postIndex])
-			index = postIndex
+			m.Val = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
 		case 5:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Dir", wireType)
 			}
 			var v int
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -186,32 +186,32 @@ func (m *Request) Unmarshal(data []byte) error {
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
-			postIndex := index + int(stringLen)
+			postIndex := iNdEx + int(stringLen)
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.PrevValue = string(data[index:postIndex])
-			index = postIndex
+			m.PrevValue = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
 		case 7:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field PrevIndex", wireType)
 			}
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				m.PrevIndex |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -223,11 +223,11 @@ func (m *Request) Unmarshal(data []byte) error {
 			}
 			var v int
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -240,11 +240,11 @@ func (m *Request) Unmarshal(data []byte) error {
 				return fmt.Errorf("proto: wrong wireType = %d for field Expiration", wireType)
 			}
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				m.Expiration |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -256,11 +256,11 @@ func (m *Request) Unmarshal(data []byte) error {
 			}
 			var v int
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -272,11 +272,11 @@ func (m *Request) Unmarshal(data []byte) error {
 				return fmt.Errorf("proto: wrong wireType = %d for field Since", wireType)
 			}
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				m.Since |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -288,11 +288,11 @@ func (m *Request) Unmarshal(data []byte) error {
 			}
 			var v int
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -305,11 +305,11 @@ func (m *Request) Unmarshal(data []byte) error {
 			}
 			var v int
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -322,11 +322,11 @@ func (m *Request) Unmarshal(data []byte) error {
 			}
 			var v int
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -338,11 +338,11 @@ func (m *Request) Unmarshal(data []byte) error {
 				return fmt.Errorf("proto: wrong wireType = %d for field Time", wireType)
 			}
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				m.Time |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -354,11 +354,11 @@ func (m *Request) Unmarshal(data []byte) error {
 			}
 			var v int
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -374,31 +374,32 @@ func (m *Request) Unmarshal(data []byte) error {
 					break
 				}
 			}
-			index -= sizeOfWire
-			skippy, err := github_com_gogo_protobuf_proto.Skip(data[index:])
+			iNdEx -= sizeOfWire
+			skippy, err := skipEtcdserver(data[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if (index + skippy) > l {
+			if (iNdEx + skippy) > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.XXX_unrecognized = append(m.XXX_unrecognized, data[index:index+skippy]...)
-			index += skippy
+			m.XXX_unrecognized = append(m.XXX_unrecognized, data[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
 		}
 	}
+
 	return nil
 }
 func (m *Metadata) Unmarshal(data []byte) error {
 	l := len(data)
-	index := 0
-	for index < l {
+	iNdEx := 0
+	for iNdEx < l {
 		var wire uint64
 		for shift := uint(0); ; shift += 7 {
-			if index >= l {
+			if iNdEx >= l {
 				return io.ErrUnexpectedEOF
 			}
-			b := data[index]
-			index++
+			b := data[iNdEx]
+			iNdEx++
 			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
@@ -412,11 +413,11 @@ func (m *Metadata) Unmarshal(data []byte) error {
 				return fmt.Errorf("proto: wrong wireType = %d for field NodeID", wireType)
 			}
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				m.NodeID |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -427,11 +428,11 @@ func (m *Metadata) Unmarshal(data []byte) error {
 				return fmt.Errorf("proto: wrong wireType = %d for field ClusterID", wireType)
 			}
 			for shift := uint(0); ; shift += 7 {
-				if index >= l {
+				if iNdEx >= l {
 					return io.ErrUnexpectedEOF
 				}
-				b := data[index]
-				index++
+				b := data[iNdEx]
+				iNdEx++
 				m.ClusterID |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
@@ -446,19 +447,104 @@ func (m *Metadata) Unmarshal(data []byte) error {
 					break
 				}
 			}
-			index -= sizeOfWire
-			skippy, err := github_com_gogo_protobuf_proto.Skip(data[index:])
+			iNdEx -= sizeOfWire
+			skippy, err := skipEtcdserver(data[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if (index + skippy) > l {
+			if (iNdEx + skippy) > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.XXX_unrecognized = append(m.XXX_unrecognized, data[index:index+skippy]...)
-			index += skippy
+			m.XXX_unrecognized = append(m.XXX_unrecognized, data[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
 		}
 	}
+
 	return nil
+}
+func skipEtcdserver(data []byte) (n int, err error) {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if iNdEx >= l {
+				return 0, io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		wireType := int(wire & 0x7)
+		switch wireType {
+		case 0:
+			for {
+				if iNdEx >= l {
+					return 0, io.ErrUnexpectedEOF
+				}
+				iNdEx++
+				if data[iNdEx-1] < 0x80 {
+					break
+				}
+			}
+			return iNdEx, nil
+		case 1:
+			iNdEx += 8
+			return iNdEx, nil
+		case 2:
+			var length int
+			for shift := uint(0); ; shift += 7 {
+				if iNdEx >= l {
+					return 0, io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				length |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			iNdEx += length
+			return iNdEx, nil
+		case 3:
+			for {
+				var innerWire uint64
+				var start int = iNdEx
+				for shift := uint(0); ; shift += 7 {
+					if iNdEx >= l {
+						return 0, io.ErrUnexpectedEOF
+					}
+					b := data[iNdEx]
+					iNdEx++
+					innerWire |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				innerWireType := int(innerWire & 0x7)
+				if innerWireType == 4 {
+					break
+				}
+				next, err := skipEtcdserver(data[start:])
+				if err != nil {
+					return 0, err
+				}
+				iNdEx = start + next
+			}
+			return iNdEx, nil
+		case 4:
+			return iNdEx, nil
+		case 5:
+			iNdEx += 4
+			return iNdEx, nil
+		default:
+			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
+		}
+	}
+	panic("unreachable")
 }
 func (m *Request) Size() (n int) {
 	var l int

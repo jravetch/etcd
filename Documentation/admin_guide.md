@@ -15,7 +15,7 @@ Using an out-of-date data directory can lead to inconsistency as the member had 
 For maximum safety, if an etcd member suffers any sort of data corruption or loss, it must be removed from the cluster.
 Once removed the member can be re-added with an empty data directory.
 
-[members-api]: https://github.com/coreos/etcd/blob/master/Documentation/other_apis.md#members-api
+[members-api]: other_apis.md#members-api
 
 #### Contents
 
@@ -61,7 +61,7 @@ After your cluster is up and running, adding or removing members is done via [ru
 
 ### Member Migration
 
-When there is a scheduled machine maintenance or retirement, you might want to migrate an etcd member to another machine without losing the data and changing the member ID. 
+When there is a scheduled machine maintenance or retirement, you might want to migrate an etcd member to another machine without losing the data and changing the member ID.
 
 The data directory contains all the data to recover a member to its point-in-time state. To migrate a member:
 
@@ -102,7 +102,7 @@ $ sudo systemctl stop etcd
 #### Copy the data directory of the now-idle member to the new machine
 
 ```
-$ tar -cvzf node1.etcd.tar.gz /var/lib/etcd/node1.etcd 
+$ tar -cvzf node1.etcd.tar.gz /var/lib/etcd/node1.etcd
 ```
 
 ```
@@ -133,7 +133,7 @@ etcd -name node1 \
 -advertise-client-urls http://10.0.1.13:2379,http://127.0.0.1:2379
 ```
 
-[change peer url]: https://github.com/coreos/etcd/blob/master/Documentation/other_apis.md#change-the-peer-urls-of-a-member
+[change peer url]: other_apis.md#change-the-peer-urls-of-a-member
 
 ### Disaster Recovery
 
@@ -181,11 +181,13 @@ Once you have verified that etcd has started successfully, shut it down and move
 
 #### Restoring the cluster
 
-Now that the node is running successfully, you can add more nodes to the cluster and restore resiliency. See the [runtime configuration](runtime-configuration.md) guide for more details.
+Now that the node is running successfully, you should [change its advertised peer URLs](other_apis.md#change-the-peer-urls-of-a-member), as the `--force-new-cluster` has set the peer URL to the default (listening on localhost).
+
+You can then add more nodes to the cluster and restore resiliency. See the [runtime configuration](runtime-configuration.md) guide for more details.
 
 ### Client Request Timeout
 
-etcd sets different timeouts for various types of client requests. The timeout value is not tunable now, which will be improved soon(https://github.com/coreos/etcd/issues/2038).
+etcd sets different timeouts for various types of client requests. The timeout value is not tunable now, which will be improved soon (https://github.com/coreos/etcd/issues/2038).
 
 #### Get requests
 
@@ -207,3 +209,11 @@ If the request times out, it indicates two possibilities:
 2. the majority of the cluster is not functioning.
 
 If timeout happens several times continuously, administrators should check status of cluster and resolve it as soon as possible.
+
+### Best Practices
+
+#### Maximum OS threads
+
+By default, etcd uses the default configuration of the Go 1.4 runtime, which means that at most one operating system thread will be used to execute code simultaneously. (Note that this default behavior [may change in Go 1.5](https://docs.google.com/document/d/1At2Ls5_fhJQ59kDK2DFVhFu3g5mATSXqqV5QrxinasI/edit)).
+
+When using etcd in heavy-load scenarios on machines with multiple cores it will usually be desirable to increase the number of threads that etcd can utilize. To do this, simply set the environment variable `GOMAXPROCS` to the desired number when starting etcd. For more information on this variable, see the Go [runtime](https://golang.org/pkg/runtime) documentation.

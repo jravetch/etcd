@@ -17,6 +17,7 @@ package rafthttp
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 	"github.com/coreos/etcd/pkg/pbutil"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/version"
 )
 
 func TestServeRaftPrefix(t *testing.T) {
@@ -185,7 +187,7 @@ func TestServeRaftStreamPrefix(t *testing.T) {
 
 		peer := newFakePeer()
 		peerGetter := &fakePeerGetter{peers: map[types.ID]Peer{types.ID(1): peer}}
-		h := newStreamHandler(peerGetter, types.ID(2), types.ID(1))
+		h := newStreamHandler(peerGetter, &fakeRaft{}, types.ID(2), types.ID(1))
 
 		rw := httptest.NewRecorder()
 		go h.ServeHTTP(rw, req)
@@ -196,17 +198,21 @@ func TestServeRaftStreamPrefix(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("#%d: failed to attach outgoingConn", i)
 		}
+		if g := rw.Header().Get("X-Server-Version"); g != version.Version {
+			t.Errorf("#%d: X-Server-Version = %s, want %s", i, g, version.Version)
+		}
 		if conn.t != tt.wtype {
-			t.Errorf("$%d: type = %s, want %s", i, conn.t, tt.wtype)
+			t.Errorf("#%d: type = %s, want %s", i, conn.t, tt.wtype)
 		}
 		if conn.termStr != wterm {
-			t.Errorf("$%d: term = %s, want %s", i, conn.termStr, wterm)
+			t.Errorf("#%d: term = %s, want %s", i, conn.termStr, wterm)
 		}
 		conn.Close()
 	}
 }
 
 func TestServeRaftStreamPrefixBad(t *testing.T) {
+	removedID := uint64(5)
 	tests := []struct {
 		method    string
 		path      string
@@ -263,6 +269,14 @@ func TestServeRaftStreamPrefixBad(t *testing.T) {
 			"1",
 			http.StatusNotFound,
 		},
+		// removed peer
+		{
+			"GET",
+			RaftStreamPrefix + "/message/" + fmt.Sprint(removedID),
+			"1",
+			"1",
+			http.StatusGone,
+		},
 		// wrong cluster ID
 		{
 			"GET",
@@ -289,7 +303,8 @@ func TestServeRaftStreamPrefixBad(t *testing.T) {
 		req.Header.Set("X-Raft-To", tt.remote)
 		rw := httptest.NewRecorder()
 		peerGetter := &fakePeerGetter{peers: map[types.ID]Peer{types.ID(1): newFakePeer()}}
-		h := newStreamHandler(peerGetter, types.ID(1), types.ID(1))
+		r := &fakeRaft{removedID: removedID}
+		h := newStreamHandler(peerGetter, r, types.ID(1), types.ID(1))
 		h.ServeHTTP(rw, req)
 
 		if rw.Code != tt.wcode {
@@ -334,6 +349,7 @@ func (pg *fakePeerGetter) Get(id types.ID) Peer { return pg.peers[id] }
 type fakePeer struct {
 	msgs  []raftpb.Message
 	urls  types.URLs
+	term  uint64
 	connc chan *outgoingConn
 }
 
@@ -345,5 +361,6 @@ func newFakePeer() *fakePeer {
 
 func (pr *fakePeer) Send(m raftpb.Message)                 { pr.msgs = append(pr.msgs, m) }
 func (pr *fakePeer) Update(urls types.URLs)                { pr.urls = urls }
+func (pr *fakePeer) setTerm(term uint64)                   { pr.term = term }
 func (pr *fakePeer) attachOutgoingConn(conn *outgoingConn) { pr.connc <- conn }
 func (pr *fakePeer) Stop()                                 {}

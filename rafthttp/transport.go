@@ -15,10 +15,10 @@
 package rafthttp
 
 import (
-	"log"
 	"net/http"
 	"sync"
 
+	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/coreos/pkg/capnslog"
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/types"
@@ -26,8 +26,11 @@ import (
 	"github.com/coreos/etcd/raft/raftpb"
 )
 
+var plog = capnslog.NewPackageLogger("github.com/coreos/etcd", "rafthttp")
+
 type Raft interface {
 	Process(ctx context.Context, m raftpb.Message) error
+	IsIDRemoved(id uint64) bool
 	ReportUnreachable(id uint64)
 	ReportSnapshot(id uint64, status raft.SnapshotStatus)
 }
@@ -45,6 +48,12 @@ type Transporter interface {
 	// If the id cannot be found in the transport, the message
 	// will be ignored.
 	Send(m []raftpb.Message)
+	// AddRemote adds a remote with given peer urls into the transport.
+	// A remote helps newly joined member to catch up the progress of cluster,
+	// and will not be used after that.
+	// It is the caller's responsibility to ensure the urls are all vaild,
+	// or it panics.
+	AddRemote(id types.ID, urls []string)
 	// AddPeer adds a peer with given peer urls into the transport.
 	// It is the caller's responsibility to ensure the urls are all vaild,
 	// or it panics.
@@ -70,9 +79,11 @@ type transport struct {
 	serverStats  *stats.ServerStats
 	leaderStats  *stats.LeaderStats
 
-	mu     sync.RWMutex      // protect the peer map
-	peers  map[types.ID]Peer // remote peers
-	errorc chan error
+	mu      sync.RWMutex         // protect the term, remote and peer map
+	term    uint64               // the latest term that has been observed
+	remotes map[types.ID]*remote // remotes map that helps newly joined member to catch up
+	peers   map[types.ID]Peer    // peers map
+	errorc  chan error
 }
 
 func NewTransporter(rt http.RoundTripper, id, cid types.ID, r Raft, errorc chan error, ss *stats.ServerStats, ls *stats.LeaderStats) Transporter {
@@ -83,6 +94,7 @@ func NewTransporter(rt http.RoundTripper, id, cid types.ID, r Raft, errorc chan 
 		raft:         r,
 		serverStats:  ss,
 		leaderStats:  ls,
+		remotes:      make(map[types.ID]*remote),
 		peers:        make(map[types.ID]Peer),
 		errorc:       errorc,
 	}
@@ -90,7 +102,7 @@ func NewTransporter(rt http.RoundTripper, id, cid types.ID, r Raft, errorc chan 
 
 func (t *transport) Handler() http.Handler {
 	pipelineHandler := NewHandler(t.raft, t.clusterID)
-	streamHandler := newStreamHandler(t, t.id, t.clusterID)
+	streamHandler := newStreamHandler(t, t.raft, t.id, t.clusterID)
 	mux := http.NewServeMux()
 	mux.Handle(RaftPrefix, pipelineHandler)
 	mux.Handle(RaftStreamPrefix+"/", streamHandler)
@@ -103,6 +115,18 @@ func (t *transport) Get(id types.ID) Peer {
 	return t.peers[id]
 }
 
+func (t *transport) maybeUpdatePeersTerm(term uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.term >= term {
+		return
+	}
+	t.term = term
+	for _, p := range t.peers {
+		p.setTerm(term)
+	}
+}
+
 func (t *transport) Send(msgs []raftpb.Message) {
 	for _, m := range msgs {
 		// intentionally dropped message
@@ -110,21 +134,34 @@ func (t *transport) Send(msgs []raftpb.Message) {
 			continue
 		}
 		to := types.ID(m.To)
+
+		if m.Type != raftpb.MsgProp { // proposal message does not have a valid term
+			t.maybeUpdatePeersTerm(m.Term)
+		}
+
 		p, ok := t.peers[to]
-		if !ok {
-			log.Printf("etcdserver: send message to unknown receiver %s", to)
+		if ok {
+			if m.Type == raftpb.MsgApp {
+				t.serverStats.SendAppendReq(m.Size())
+			}
+			p.Send(m)
 			continue
 		}
 
-		if m.Type == raftpb.MsgApp {
-			t.serverStats.SendAppendReq(m.Size())
+		g, ok := t.remotes[to]
+		if ok {
+			g.Send(m)
+			continue
 		}
 
-		p.Send(m)
+		plog.Debugf("ignored message %s (sent to unknown peer %s)", m.Type, to)
 	}
 }
 
 func (t *transport) Stop() {
+	for _, r := range t.remotes {
+		r.Stop()
+	}
 	for _, p := range t.peers {
 		p.Stop()
 	}
@@ -133,31 +170,36 @@ func (t *transport) Stop() {
 	}
 }
 
+func (t *transport) AddRemote(id types.ID, us []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.remotes[id]; ok {
+		return
+	}
+	urls, err := types.NewURLs(us)
+	if err != nil {
+		plog.Panicf("newURLs %+v should never fail: %+v", us, err)
+	}
+	t.remotes[id] = startRemote(t.roundTripper, urls, t.id, id, t.clusterID, t.raft, t.errorc)
+}
+
 func (t *transport) AddPeer(id types.ID, us []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// There is no need to build connection to itself because local message
-	// is not sent through transport.
-	if id == t.id {
-		return
-	}
 	if _, ok := t.peers[id]; ok {
 		return
 	}
 	urls, err := types.NewURLs(us)
 	if err != nil {
-		log.Panicf("newURLs %+v should never fail: %+v", us, err)
+		plog.Panicf("newURLs %+v should never fail: %+v", us, err)
 	}
 	fs := t.leaderStats.Follower(id.String())
-	t.peers[id] = startPeer(t.roundTripper, urls, t.id, id, t.clusterID, t.raft, fs, t.errorc)
+	t.peers[id] = startPeer(t.roundTripper, urls, t.id, id, t.clusterID, t.raft, fs, t.errorc, t.term)
 }
 
 func (t *transport) RemovePeer(id types.ID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if id == t.id {
-		return
-	}
 	t.removePeer(id)
 }
 
@@ -174,7 +216,7 @@ func (t *transport) removePeer(id types.ID) {
 	if peer, ok := t.peers[id]; ok {
 		peer.Stop()
 	} else {
-		log.Panicf("rafthttp: unexpected removal of unknown peer '%d'", id)
+		plog.Panicf("unexpected removal of unknown peer '%d'", id)
 	}
 	delete(t.peers, id)
 	delete(t.leaderStats.Followers, id.String())
@@ -183,16 +225,13 @@ func (t *transport) removePeer(id types.ID) {
 func (t *transport) UpdatePeer(id types.ID, us []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if id == t.id {
-		return
-	}
 	// TODO: return error or just panic?
 	if _, ok := t.peers[id]; !ok {
 		return
 	}
 	urls, err := types.NewURLs(us)
 	if err != nil {
-		log.Panicf("newURLs %+v should never fail: %+v", us, err)
+		plog.Panicf("newURLs %+v should never fail: %+v", us, err)
 	}
 	t.peers[id].Update(urls)
 }

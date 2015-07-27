@@ -16,9 +16,11 @@ package rafthttp
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/version"
 )
 
 const (
@@ -38,37 +41,42 @@ const (
 	pipelineBufSize = 64
 )
 
+var errStopped = errors.New("stopped")
+
+type canceler interface {
+	CancelRequest(*http.Request)
+}
+
 type pipeline struct {
-	id  types.ID
-	cid types.ID
+	from, to types.ID
+	cid      types.ID
 
 	tr     http.RoundTripper
 	picker *urlPicker
+	status *peerStatus
 	fs     *stats.FollowerStats
 	r      Raft
 	errorc chan error
 
 	msgc chan raftpb.Message
 	// wait for the handling routines
-	wg sync.WaitGroup
-	sync.Mutex
-	// if the last send was successful, the pipeline is active.
-	// Or it is inactive
-	active  bool
-	errored error
+	wg    sync.WaitGroup
+	stopc chan struct{}
 }
 
-func newPipeline(tr http.RoundTripper, picker *urlPicker, id, cid types.ID, fs *stats.FollowerStats, r Raft, errorc chan error) *pipeline {
+func newPipeline(tr http.RoundTripper, picker *urlPicker, from, to, cid types.ID, status *peerStatus, fs *stats.FollowerStats, r Raft, errorc chan error) *pipeline {
 	p := &pipeline{
-		id:     id,
+		from:   from,
+		to:     to,
 		cid:    cid,
 		tr:     tr,
 		picker: picker,
+		status: status,
 		fs:     fs,
 		r:      r,
 		errorc: errorc,
+		stopc:  make(chan struct{}),
 		msgc:   make(chan raftpb.Message, pipelineBufSize),
-		active: true,
 	}
 	p.wg.Add(connPerPipeline)
 	for i := 0; i < connPerPipeline; i++ {
@@ -79,6 +87,7 @@ func newPipeline(tr http.RoundTripper, picker *urlPicker, id, cid types.ID, fs *
 
 func (p *pipeline) stop() {
 	close(p.msgc)
+	close(p.stopc)
 	p.wg.Wait()
 }
 
@@ -87,21 +96,15 @@ func (p *pipeline) handle() {
 	for m := range p.msgc {
 		start := time.Now()
 		err := p.post(pbutil.MustMarshal(&m))
+		if err == errStopped {
+			return
+		}
 		end := time.Now()
 
-		p.Lock()
 		if err != nil {
 			reportSentFailure(pipelineMsg, m)
-
-			if p.errored == nil || p.errored.Error() != err.Error() {
-				log.Printf("pipeline: error posting to %s: %v", p.id, err)
-				p.errored = err
-			}
-			if p.active {
-				log.Printf("pipeline: the connection with %s became inactive", p.id)
-				p.active = false
-			}
-			if m.Type == raftpb.MsgApp {
+			p.status.deactivate(failureType{source: pipelineMsg, action: "write"}, err.Error())
+			if m.Type == raftpb.MsgApp && p.fs != nil {
 				p.fs.Fail()
 			}
 			p.r.ReportUnreachable(m.To)
@@ -109,12 +112,8 @@ func (p *pipeline) handle() {
 				p.r.ReportSnapshot(m.To, raft.SnapshotFailure)
 			}
 		} else {
-			if !p.active {
-				log.Printf("pipeline: the connection with %s became active", p.id)
-				p.active = true
-				p.errored = nil
-			}
-			if m.Type == raftpb.MsgApp {
+			p.status.activate()
+			if m.Type == raftpb.MsgApp && p.fs != nil {
 				p.fs.Succ(end.Sub(start))
 			}
 			if isMsgSnap(m) {
@@ -122,13 +121,12 @@ func (p *pipeline) handle() {
 			}
 			reportSentDuration(pipelineMsg, m, time.Since(start))
 		}
-		p.Unlock()
 	}
 }
 
 // post POSTs a data payload to a url. Returns nil if the POST succeeds,
 // error on any failure.
-func (p *pipeline) post(data []byte) error {
+func (p *pipeline) post(data []byte) (err error) {
 	u := p.picker.pick()
 	uu := u
 	uu.Path = RaftPrefix
@@ -138,8 +136,38 @@ func (p *pipeline) post(data []byte) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/protobuf")
+	req.Header.Set("X-Server-From", p.from.String())
+	req.Header.Set("X-Server-Version", version.Version)
+	req.Header.Set("X-Min-Cluster-Version", version.MinClusterVersion)
 	req.Header.Set("X-Etcd-Cluster-ID", p.cid.String())
+
+	var stopped bool
+	defer func() {
+		if stopped {
+			// rewrite to errStopped so the caller goroutine can stop itself
+			err = errStopped
+		}
+	}()
+	done := make(chan struct{}, 1)
+	go func() {
+		select {
+		case <-done:
+		case <-p.stopc:
+			waitSchedule()
+			stopped = true
+			if cancel, ok := p.tr.(canceler); ok {
+				cancel.CancelRequest(req)
+			}
+		}
+	}()
+
 	resp, err := p.tr.RoundTrip(req)
+	done <- struct{}{}
+	if err != nil {
+		p.picker.unreachable(u)
+		return err
+	}
+	b, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		p.picker.unreachable(u)
 		return err
@@ -148,12 +176,17 @@ func (p *pipeline) post(data []byte) error {
 
 	switch resp.StatusCode {
 	case http.StatusPreconditionFailed:
-		err := fmt.Errorf("conflicting cluster ID with the target cluster (%s != %s)", resp.Header.Get("X-Etcd-Cluster-ID"), p.cid)
-		select {
-		case p.errorc <- err:
+		switch strings.TrimSuffix(string(b), "\n") {
+		case errIncompatibleVersion.Error():
+			plog.Errorf("request sent was ignored by peer %s (server version incompatible)", p.to)
+			return errIncompatibleVersion
+		case errClusterIDMismatch.Error():
+			plog.Errorf("request sent was ignored (cluster ID mismatch: remote[%s]=%s, local=%s)",
+				p.to, resp.Header.Get("X-Etcd-Cluster-ID"), p.cid)
+			return errClusterIDMismatch
 		default:
+			return fmt.Errorf("unhandled error %q when precondition failed", string(b))
 		}
-		return nil
 	case http.StatusForbidden:
 		err := fmt.Errorf("the member has been permanently removed from the cluster")
 		select {
@@ -167,3 +200,6 @@ func (p *pipeline) post(data []byte) error {
 		return fmt.Errorf("unexpected http status %s while posting to %q", http.StatusText(resp.StatusCode), req.URL.String())
 	}
 }
+
+// waitSchedule waits other goroutines to be scheduled for a while
+func waitSchedule() { time.Sleep(time.Millisecond) }

@@ -48,7 +48,7 @@ member flags:
 clustering flags:
 
 	--initial-advertise-peer-urls 'http://localhost:2380,http://localhost:7001'
-		list of this member's peer URLs to advertise to the rest of the cluster. 
+		list of this member's peer URLs to advertise to the rest of the cluster.
 	--initial-cluster 'default=http://localhost:2380,default=http://localhost:7001'
 		initial cluster configuration for bootstrapping.
 	--initial-cluster-state 'new'
@@ -56,7 +56,8 @@ clustering flags:
 	--initial-cluster-token 'etcd-cluster'
 		initial cluster token for the etcd cluster during bootstrap.
 	--advertise-client-urls 'http://localhost:2379,http://localhost:4001'
-		list of this member's client URLs to advertise to the rest of the cluster.
+		list of this member's client URLs to advertise to the public.
+		The client URLs advertised should be accessible to machines that talk to etcd cluster. etcd client libraries parse these URLs to connect to the cluster.
 	--discovery ''
 		discovery URL used to bootstrap the cluster.
 	--discovery-fallback 'proxy'
@@ -71,6 +72,16 @@ proxy flags:
 
 	--proxy 'off'
 		proxy mode setting ('off', 'readonly' or 'on').
+	--proxy-failure-wait 5000
+		time (in milliseconds) an endpoint will be held in a failed state.
+	--proxy-refresh-interval 30000
+		time (in milliseconds) of the endpoints refresh interval.
+	--proxy-dial-timeout 1000
+		time (in milliseconds) for a dial to timeout.
+	--proxy-write-timeout 5000
+		time (in milliseconds) for a write to timeout.
+	--proxy-read-timeout 0
+		time (in milliseconds) for a read to timeout.
 
 
 security flags:
@@ -96,12 +107,18 @@ security flags:
 	--peer-trusted-ca-file ''
 		path to the peer server TLS trusted CA file.
 
+logging flags
+
+	--debug 'false'
+		enable debug-level logging for etcd.
+	--log-package-levels ''
+		set individual packages to various log levels (eg: 'etcdmain=CRITICAL,etcdserver=DEBUG')
 
 unsafe flags:
 
 Please be CAUTIOUS when using unsafe flags because it will break the guarantees
 given by the consensus protocol.
-	
+
 	--force-new-cluster 'false'
 		force to create a new one-member cluster.
 `

@@ -16,9 +16,7 @@ package etcdhttp
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
-	"strconv"
 
 	"github.com/coreos/etcd/etcdserver"
 	"github.com/coreos/etcd/rafthttp"
@@ -29,10 +27,9 @@ const (
 )
 
 // NewPeerHandler generates an http.Handler to handle etcd peer (raft) requests.
-func NewPeerHandler(clusterInfo etcdserver.ClusterInfo, timer etcdserver.RaftTimer, raftHandler http.Handler) http.Handler {
+func NewPeerHandler(cluster etcdserver.Cluster, raftHandler http.Handler) http.Handler {
 	mh := &peerMembersHandler{
-		clusterInfo: clusterInfo,
-		timer:       timer,
+		cluster: cluster,
 	}
 
 	mux := http.NewServeMux()
@@ -40,28 +37,27 @@ func NewPeerHandler(clusterInfo etcdserver.ClusterInfo, timer etcdserver.RaftTim
 	mux.Handle(rafthttp.RaftPrefix, raftHandler)
 	mux.Handle(rafthttp.RaftPrefix+"/", raftHandler)
 	mux.Handle(peerMembersPrefix, mh)
+	mux.HandleFunc(versionPath, versionHandler(cluster, serveVersion))
 	return mux
 }
 
 type peerMembersHandler struct {
-	clusterInfo etcdserver.ClusterInfo
-	timer       etcdserver.RaftTimer
+	cluster etcdserver.Cluster
 }
 
 func (h *peerMembersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !allowMethod(w, r.Method, "GET") {
 		return
 	}
-	w.Header().Set("X-Etcd-Cluster-ID", h.clusterInfo.ID().String())
-	w.Header().Set("X-Raft-Index", strconv.FormatUint(h.timer.Index(), 10))
+	w.Header().Set("X-Etcd-Cluster-ID", h.cluster.ID().String())
 
 	if r.URL.Path != peerMembersPrefix {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
 	}
-	ms := h.clusterInfo.Members()
+	ms := h.cluster.Members()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(ms); err != nil {
-		log.Printf("etcdhttp: %v", err)
+		plog.Warningf("failed to encode members response (%v)", err)
 	}
 }

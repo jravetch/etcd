@@ -5,7 +5,7 @@
 
 ![etcd Logo](logos/etcd-horizontal-color.png)
 
-etcd is a distributed, consistent key value store for shared configuration and service discovery with a focus on being:
+etcd is a distributed, consistent key-value store for shared configuration and service discovery, with a focus on being:
 
 * *Simple*: curl'able user facing API (HTTP+JSON)
 * *Secure*: optional SSL client cert authentication
@@ -17,8 +17,6 @@ etcd is written in Go and uses the [Raft][raft] consensus algorithm to manage a 
 See [etcdctl][etcdctl] for a simple command line client.
 Or feel free to just use curl, as in the examples below.
 
-[zookeeper]: http://zookeeper.apache.org/
-[doozer]: https://github.com/ha/doozerd
 [raft]: http://raftconsensus.github.io/
 [etcdctl]: https://github.com/coreos/etcd/tree/master/etcdctl
 
@@ -28,13 +26,14 @@ If you're considering etcd for production use, please see: [production-ready.md]
 
 ### Getting etcd
 
-The latest release and setup instructions are available at [GitHub][github-release].
+The easiest way to get etcd is to install one of the pre-built binaries from the tagged releases: instructions are available on [GitHub][github-release].
 
-You can build a latest etcd from master branch. All development occurs on the master branch which includes new features and bug fixes.
-
-Bug fixes should target the master branch and ported to the appropriate release branch as described in the [branch management](./Documentation/branch_management.md) guide.
+For those wanting to try the very latest version, you can build the latest version of etcd from the `master` branch.
+All development occurs on `master`, including new features and bug fixes.
+Bug fixes are first targeted at `master` and subsequently ported to release branches, as described in the [branch management][branch-management] guide.
 
 [github-release]: https://github.com/coreos/etcd/releases/
+[branch-management]: ./Documentation/branch_management.md
 
 ### Running etcd
 
@@ -87,18 +86,22 @@ Now it's time to dig into the full etcd API and other guides.
 [libraries-and-tools]: ./Documentation/libraries-and-tools.md
 [security]: ./Documentation/security.md
 [tuning]: ./Documentation/tuning.md
-[upgrade]: ./Documentation/0_4_migration_tool.md
+[upgrade]: ./tools/etcd-migrate/README.md
 
 ## Contact
 
 - Mailing list: [etcd-dev](https://groups.google.com/forum/?hl=en#!forum/etcd-dev)
-- IRC: #[coreos](irc://irc.freenode.org:6667/#coreos) on freenode.org
-- Planning/Roadmap: [milestones](https://github.com/coreos/etcd/milestones)
+- IRC: #[etcd](irc://irc.freenode.org:6667/#etcd) on freenode.org
+- Planning/Roadmap: [milestones](https://github.com/coreos/etcd/milestones), [roadmap](./ROADMAP.md)
 - Bugs: [issues](https://github.com/coreos/etcd/issues)
 
 ## Contributing
 
 See [CONTRIBUTING](CONTRIBUTING.md) for details on submitting patches and the contribution workflow.
+
+## Reporting bugs
+
+See [reporting bugs](Documentation/reporting_bugs.md) for details about reporting any issue you may encounter..
 
 ## Project Details
 

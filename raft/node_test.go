@@ -199,7 +199,7 @@ func TestBlockProposal(t *testing.T) {
 		errc <- n.Propose(context.TODO(), []byte("somedata"))
 	}()
 
-	testutil.ForceGosched()
+	testutil.WaitSchedule()
 	select {
 	case err := <-errc:
 		t.Errorf("err = %v, want blocking", err)
@@ -207,7 +207,7 @@ func TestBlockProposal(t *testing.T) {
 	}
 
 	n.Campaign(context.TODO())
-	testutil.ForceGosched()
+	testutil.WaitSchedule()
 	select {
 	case err := <-errc:
 		if err != nil {
@@ -362,7 +362,7 @@ func TestNodeRestart(t *testing.T) {
 	st := raftpb.HardState{Term: 1, Commit: 1}
 
 	want := Ready{
-		HardState: emptyState,
+		HardState: st,
 		// commit up to index commit index in st
 		CommittedEntries: entries[:st.Commit],
 	}
@@ -405,7 +405,7 @@ func TestNodeRestartFromSnapshot(t *testing.T) {
 	st := raftpb.HardState{Term: 1, Commit: 3}
 
 	want := Ready{
-		HardState: emptyState,
+		HardState: st,
 		// commit up to index commit index in st
 		CommittedEntries: entries,
 	}

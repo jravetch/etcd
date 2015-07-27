@@ -13,6 +13,7 @@ To start etcd automatically using custom settings at startup in Linux, using a [
 ##### -name
 + Human-readable name for this member.
 + default: "default"
++ This value is referenced as this node's own entries listed in the `-initial-cluster` flag (Ex: `default=http://localhost:2380` or `default=http://localhost:2380,default=http://localhost:7001`). This needs to match the key used in the flag if you're using [static boostrapping](clustering.md#static).
 
 ##### -data-dir
 + Path to the data directory.
@@ -66,6 +67,7 @@ To start etcd automatically using custom settings at startup in Linux, using a [
 ##### -initial-cluster
 + Initial cluster configuration for bootstrapping.
 + default: "default=http://localhost:2380,default=http://localhost:7001"
++ The key is the value of the `-name` flag for each node provided. The default uses `default` for the key because this is the default for the `-name` flag.
 
 ##### -initial-cluster-state
 + Initial cluster state ("new" or "existing"). Set to `new` for all members present during initial static or DNS bootstrapping. If this option is set to `existing`, etcd will attempt to join the existing cluster. If the wrong value is set, etcd will attempt to start but fail safely.
@@ -104,6 +106,27 @@ To start etcd automatically using custom settings at startup in Linux, using a [
 ##### -proxy
 + Proxy mode setting ("off", "readonly" or "on").
 + default: "off"
+
+##### -proxy-failure-wait
++ Time (in milliseconds) an endpoint will be held in a failed state before being reconsidered for proxied requests.
++ default: 5000
+
+##### -proxy-refresh-interval
++ Time (in milliseconds) of the endpoints refresh interval.
++ default: 30000
+
+##### -proxy-dial-timeout
++ Time (in milliseconds) for a dial to timeout or 0 to disable the timeout
++ default: 1000
+
+##### -proxy-write-timeout
++ Time (in milliseconds) for a write to timeout or 0 to disable the timeout.
++ default: 5000
+
+##### -proxy-read-timeout
++ Time (in milliseconds) for a read to timeout or 0 to disable the timeout.
++ Don't change this value if you use watches because they are using long polling requests.
++ default: 0
 
 ### Security Flags
 
@@ -149,6 +172,17 @@ The security flags help to [build a secure etcd cluster][security].
 + Path to the peer server TLS trusted CA file.
 + default: none
 
+### Logging Flags
+
+##### -debug
++ Drop the default log level to DEBUG for all subpackages.
++ default: false (INFO for all packages)
+
+##### -log-package-levels
++ Set individual etcd subpackages to specific log levels. An example being `etcdserver=WARNING,security=DEBUG` 
++ default: none (INFO for all packages)
+
+
 ### Unsafe Flags
 
 Please be CAUTIOUS when using unsafe flags because it will break the guarantees given by the consensus protocol.
@@ -165,9 +199,9 @@ Follow the instructions when using these flags.
 + Print the version and exit.
 + default: false
 
-[build-cluster]: https://github.com/coreos/etcd/blob/master/Documentation/clustering.md#static
-[reconfig]: https://github.com/coreos/etcd/blob/master/Documentation/runtime-configuration.md
-[discovery]: https://github.com/coreos/etcd/blob/master/Documentation/clustering.md#discovery
-[proxy]: https://github.com/coreos/etcd/blob/master/Documentation/proxy.md
-[security]: https://github.com/coreos/etcd/blob/master/Documentation/security.md
-[restore]: https://github.com/coreos/etcd/blob/master/Documentation/admin_guide.md#restoring-a-backup
+[build-cluster]: clustering.md#static
+[reconfig]: runtime-configuration.md
+[discovery]: clustering.md#discovery
+[proxy]: proxy.md
+[security]: security.md
+[restore]: admin_guide.md#restoring-a-backup

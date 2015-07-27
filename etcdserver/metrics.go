@@ -15,7 +15,6 @@
 package etcdserver
 
 import (
-	"log"
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/prometheus/client_golang/prometheus"
@@ -25,23 +24,31 @@ import (
 var (
 	// TODO: with label in v3?
 	proposeDurations = prometheus.NewSummary(prometheus.SummaryOpts{
-		Name: "etcdserver_proposal_durations_milliseconds",
-		Help: "The latency distributions of committing proposal.",
+		Namespace: "etcd",
+		Subsystem: "server",
+		Name:      "proposal_durations_milliseconds",
+		Help:      "The latency distributions of committing proposal.",
 	})
 	proposePending = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "etcdserver_pending_proposal_total",
-		Help: "The total number of pending proposals.",
+		Namespace: "etcd",
+		Subsystem: "server",
+		Name:      "pending_proposal_total",
+		Help:      "The total number of pending proposals.",
 	})
 	// This is number of proposal failed in client's view.
 	// The proposal might be later got committed in raft.
 	proposeFailed = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "etcdserver_proposal_failed_total",
-		Help: "The total number of failed proposals.",
+		Namespace: "etcd",
+		Subsystem: "server",
+		Name:      "proposal_failed_total",
+		Help:      "The total number of failed proposals.",
 	})
 
 	fileDescriptorUsed = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "file_descriptors_used",
-		Help: "The number of file descriptors used",
+		Namespace: "etcd",
+		Subsystem: "server",
+		Name:      "file_descriptors_used_total",
+		Help:      "The total number of file descriptors used.",
 	})
 )
 
@@ -58,17 +65,17 @@ func monitorFileDescriptor(done <-chan struct{}) {
 	for {
 		used, err := runtime.FDUsage()
 		if err != nil {
-			log.Printf("etcdserver: cannot monitor file descriptor usage (%v)", err)
+			plog.Errorf("cannot monitor file descriptor usage (%v)", err)
 			return
 		}
 		fileDescriptorUsed.Set(float64(used))
 		limit, err := runtime.FDLimit()
 		if err != nil {
-			log.Printf("etcdserver: cannot monitor file descriptor usage (%v)", err)
+			plog.Errorf("cannot monitor file descriptor usage (%v)", err)
 			return
 		}
 		if used >= limit/5*4 {
-			log.Printf("etcdserver: 80%% of the file descriptor limit is used [used = %d, limit = %d]", used, limit)
+			plog.Warningf("80%% of the file descriptor limit is used [used = %d, limit = %d]", used, limit)
 		}
 		select {
 		case <-ticker.C:

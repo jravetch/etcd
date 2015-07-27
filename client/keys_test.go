@@ -102,27 +102,38 @@ func TestGetAction(t *testing.T) {
 	tests := []struct {
 		recursive bool
 		sorted    bool
+		quorum    bool
 		wantQuery string
 	}{
 		{
 			recursive: false,
 			sorted:    false,
-			wantQuery: "recursive=false&sorted=false",
+			quorum:    false,
+			wantQuery: "quorum=false&recursive=false&sorted=false",
 		},
 		{
 			recursive: true,
 			sorted:    false,
-			wantQuery: "recursive=true&sorted=false",
+			quorum:    false,
+			wantQuery: "quorum=false&recursive=true&sorted=false",
 		},
 		{
 			recursive: false,
 			sorted:    true,
-			wantQuery: "recursive=false&sorted=true",
+			quorum:    false,
+			wantQuery: "quorum=false&recursive=false&sorted=true",
 		},
 		{
 			recursive: true,
 			sorted:    true,
-			wantQuery: "recursive=true&sorted=true",
+			quorum:    false,
+			wantQuery: "quorum=false&recursive=true&sorted=true",
+		},
+		{
+			recursive: false,
+			sorted:    false,
+			quorum:    true,
+			wantQuery: "quorum=true&recursive=false&sorted=false",
 		},
 	}
 
@@ -131,6 +142,7 @@ func TestGetAction(t *testing.T) {
 			Key:       "/foo/bar",
 			Recursive: tt.recursive,
 			Sorted:    tt.sorted,
+			Quorum:    tt.quorum,
 		}
 		got := *f.HTTPRequest(ep)
 
@@ -329,6 +341,45 @@ func TestSetAction(t *testing.T) {
 			},
 			wantURL:  "http://example.com/foo",
 			wantBody: "ttl=180&value=",
+		},
+		// Dir is set
+		{
+			act: setAction{
+				Key: "foo",
+				Dir: true,
+			},
+			wantURL:  "http://example.com/foo?dir=true",
+			wantBody: "",
+		},
+		// Dir is set with a value
+		{
+			act: setAction{
+				Key:   "foo",
+				Value: "bar",
+				Dir:   true,
+			},
+			wantURL:  "http://example.com/foo?dir=true",
+			wantBody: "",
+		},
+		// Dir is set with PrevExist set to true
+		{
+			act: setAction{
+				Key:       "foo",
+				PrevExist: PrevExist,
+				Dir:       true,
+			},
+			wantURL:  "http://example.com/foo?dir=true&prevExist=true",
+			wantBody: "",
+		},
+		// Dir is set with PrevValue
+		{
+			act: setAction{
+				Key:       "foo",
+				PrevValue: "bar",
+				Dir:       true,
+			},
+			wantURL:  "http://example.com/foo?dir=true",
+			wantBody: "",
 		},
 	}
 
@@ -923,7 +974,7 @@ func TestHTTPKeysAPIWatcherAction(t *testing.T) {
 	}
 }
 
-func TestHTTPKeysAPIcreateInOrderAction(t *testing.T) {
+func TestHTTPKeysAPISetAction(t *testing.T) {
 	tests := []struct {
 		key        string
 		value      string
@@ -967,6 +1018,7 @@ func TestHTTPKeysAPIcreateInOrderAction(t *testing.T) {
 				PrevIndex: 13,
 				PrevExist: PrevExist,
 				TTL:       time.Minute,
+				Dir:       true,
 			},
 			wantAction: &setAction{
 				Key:       "/foo",
@@ -975,6 +1027,7 @@ func TestHTTPKeysAPIcreateInOrderAction(t *testing.T) {
 				PrevIndex: 13,
 				PrevExist: PrevExist,
 				TTL:       time.Minute,
+				Dir:       true,
 			},
 		},
 	}
@@ -1079,11 +1132,13 @@ func TestHTTPKeysAPIGetAction(t *testing.T) {
 			opts: &GetOptions{
 				Sort:      true,
 				Recursive: true,
+				Quorum:    true,
 			},
 			wantAction: &getAction{
 				Key:       "/foo",
 				Sorted:    true,
 				Recursive: true,
+				Quorum:    true,
 			},
 		},
 	}
@@ -1312,4 +1367,27 @@ func TestHTTPKeysAPIUpdateAction(t *testing.T) {
 
 	kAPI := httpKeysAPI{client: &actionAssertingHTTPClient{t: t, act: act}}
 	kAPI.Update(context.Background(), "/foo", "bar")
+}
+
+func TestNodeTTLDuration(t *testing.T) {
+	tests := []struct {
+		node *Node
+		want time.Duration
+	}{
+		{
+			node: &Node{TTL: 0},
+			want: 0,
+		},
+		{
+			node: &Node{TTL: 97},
+			want: 97 * time.Second,
+		},
+	}
+
+	for i, tt := range tests {
+		got := tt.node.TTLDuration()
+		if tt.want != got {
+			t.Errorf("#%d: incorrect duration: want=%v got=%v", i, tt.want, got)
+		}
+	}
 }

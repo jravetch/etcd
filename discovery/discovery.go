@@ -17,8 +17,8 @@ package discovery
 import (
 	"errors"
 	"fmt"
-	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/coreos/pkg/capnslog"
 	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/jonboulle/clockwork"
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
 	"github.com/coreos/etcd/client"
@@ -34,13 +35,17 @@ import (
 )
 
 var (
-	ErrInvalidURL     = errors.New("discovery: invalid URL")
-	ErrBadSizeKey     = errors.New("discovery: size key is bad")
-	ErrSizeNotFound   = errors.New("discovery: size key not found")
-	ErrTokenNotFound  = errors.New("discovery: token not found")
-	ErrDuplicateID    = errors.New("discovery: found duplicate id")
-	ErrFullCluster    = errors.New("discovery: cluster is full")
-	ErrTooManyRetries = errors.New("discovery: too many retries")
+	plog = capnslog.NewPackageLogger("github.com/coreos/etcd", "discovery")
+
+	ErrInvalidURL           = errors.New("discovery: invalid URL")
+	ErrBadSizeKey           = errors.New("discovery: size key is bad")
+	ErrSizeNotFound         = errors.New("discovery: size key not found")
+	ErrTokenNotFound        = errors.New("discovery: token not found")
+	ErrDuplicateID          = errors.New("discovery: found duplicate id")
+	ErrDuplicateName        = errors.New("discovery: found duplicate name")
+	ErrFullCluster          = errors.New("discovery: cluster is full")
+	ErrTooManyRetries       = errors.New("discovery: too many retries")
+	ErrBadDiscoveryEndpoint = errors.New("discovery: bad discovery endpoint")
 )
 
 var (
@@ -102,7 +107,7 @@ func newProxyFunc(proxy string) (func(*http.Request) (*url.URL, error), error) {
 		return nil, fmt.Errorf("invalid proxy address %q: %v", proxy, err)
 	}
 
-	log.Printf("discovery: using proxy %q", proxyURL.String())
+	plog.Infof("using proxy %q", proxyURL.String())
 	return http.ProxyURL(proxyURL), nil
 }
 
@@ -118,7 +123,15 @@ func newDiscovery(durl, dproxyurl string, id types.ID) (*discovery, error) {
 		return nil, err
 	}
 	cfg := client.Config{
-		Transport: &http.Transport{Proxy: pf},
+		Transport: &http.Transport{
+			Proxy: pf,
+			Dial: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).Dial,
+			TLSHandshakeTimeout: 10 * time.Second,
+			// TODO: add ResponseHeaderTimeout back when watch on discovery service writes header early
+		},
 		Endpoints: []string{u.String()},
 	}
 	c, err := client.New(cfg)
@@ -159,14 +172,14 @@ func (d *discovery) joinCluster(config string) (string, error) {
 		return "", err
 	}
 
-	return nodesToCluster(all), nil
+	return nodesToCluster(all, size)
 }
 
 func (d *discovery) getCluster() (string, error) {
 	nodes, size, index, err := d.checkCluster()
 	if err != nil {
 		if err == ErrFullCluster {
-			return nodesToCluster(nodes), nil
+			return nodesToCluster(nodes, size)
 		}
 		return "", err
 	}
@@ -175,7 +188,7 @@ func (d *discovery) getCluster() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return nodesToCluster(all), nil
+	return nodesToCluster(all, size)
 }
 
 func (d *discovery) createSelf(contents string) error {
@@ -183,7 +196,7 @@ func (d *discovery) createSelf(contents string) error {
 	resp, err := d.c.Create(ctx, d.selfKey(), contents)
 	cancel()
 	if err != nil {
-		if eerr, ok := err.(*client.Error); ok && eerr.Code == client.ErrorCodeNodeExist {
+		if eerr, ok := err.(client.Error); ok && eerr.Code == client.ErrorCodeNodeExist {
 			return ErrDuplicateID
 		}
 		return err
@@ -204,6 +217,9 @@ func (d *discovery) checkCluster() ([]*client.Node, int, uint64, error) {
 	if err != nil {
 		if eerr, ok := err.(*client.Error); ok && eerr.Code == client.ErrorCodeKeyNotFound {
 			return nil, 0, 0, ErrSizeNotFound
+		}
+		if err == client.ErrInvalidJSON {
+			return nil, 0, 0, ErrBadDiscoveryEndpoint
 		}
 		if err == context.DeadlineExceeded {
 			return d.checkClusterRetry()
@@ -250,7 +266,7 @@ func (d *discovery) checkCluster() ([]*client.Node, int, uint64, error) {
 func (d *discovery) logAndBackoffForRetry(step string) {
 	d.retries++
 	retryTime := time.Second * (0x1 << d.retries)
-	log.Println("discovery: during", step, "connection to", d.url, "timed out, retrying in", retryTime)
+	plog.Infof("%s: connection to %s timed out, retrying in %s", step, d.url, retryTime)
 	d.clock.Sleep(retryTime)
 }
 
@@ -284,15 +300,15 @@ func (d *discovery) waitNodes(nodes []*client.Node, size int, index uint64) ([]*
 	copy(all, nodes)
 	for _, n := range all {
 		if path.Base(n.Key) == path.Base(d.selfKey()) {
-			log.Printf("discovery: found self %s in the cluster", path.Base(d.selfKey()))
+			plog.Noticef("found self %s in the cluster", path.Base(d.selfKey()))
 		} else {
-			log.Printf("discovery: found peer %s in the cluster", path.Base(n.Key))
+			plog.Noticef("found peer %s in the cluster", path.Base(n.Key))
 		}
 	}
 
 	// wait for others
 	for len(all) < size {
-		log.Printf("discovery: found %d peer(s), waiting for %d more", len(all), size-len(all))
+		plog.Noticef("found %d peer(s), waiting for %d more", len(all), size-len(all))
 		resp, err := w.Next(context.Background())
 		if err != nil {
 			if err == context.DeadlineExceeded {
@@ -300,10 +316,10 @@ func (d *discovery) waitNodes(nodes []*client.Node, size int, index uint64) ([]*
 			}
 			return nil, err
 		}
-		log.Printf("discovery: found peer %s in the cluster", path.Base(resp.Node.Key))
+		plog.Noticef("found peer %s in the cluster", path.Base(resp.Node.Key))
 		all = append(all, resp.Node)
 	}
-	log.Printf("discovery: found %d needed peer(s)", len(all))
+	plog.Noticef("found %d needed peer(s)", len(all))
 	return all, nil
 }
 
@@ -311,12 +327,20 @@ func (d *discovery) selfKey() string {
 	return path.Join("/", d.cluster, d.id.String())
 }
 
-func nodesToCluster(ns []*client.Node) string {
+func nodesToCluster(ns []*client.Node, size int) (string, error) {
 	s := make([]string, len(ns))
 	for i, n := range ns {
 		s[i] = n.Value
 	}
-	return strings.Join(s, ",")
+	us := strings.Join(s, ",")
+	m, err := types.NewURLsMap(us)
+	if err != nil {
+		return us, ErrInvalidURL
+	}
+	if m.Len() != size {
+		return us, ErrDuplicateName
+	}
+	return us, nil
 }
 
 type sortableNodes struct{ Nodes []*client.Node }

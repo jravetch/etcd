@@ -17,9 +17,9 @@ package etcdmain
 import (
 	"flag"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/coreos/etcd/etcdserver"
@@ -60,8 +60,9 @@ var (
 		"vv",
 	}
 
-	ErrConflictBootstrapFlags = fmt.Errorf("multiple discovery or bootstrap flags are set" +
+	ErrConflictBootstrapFlags = fmt.Errorf("multiple discovery or bootstrap flags are set. " +
 		"Choose one of \"initial-cluster\", \"discovery\" or \"discovery-srv\"")
+	errUnsetAdvertiseClientURLsFlag = fmt.Errorf("-advertise-client-urls is required when -listen-client-urls is set explicitly")
 )
 
 type config struct {
@@ -91,10 +92,19 @@ type config struct {
 	initialClusterToken string
 
 	// proxy
-	proxy *flags.StringsFlag
+	proxy                  *flags.StringsFlag
+	proxyFailureWaitMs     uint
+	proxyRefreshIntervalMs uint
+	proxyDialTimeoutMs     uint
+	proxyWriteTimeoutMs    uint
+	proxyReadTimeoutMs     uint
 
 	// security
 	clientTLSInfo, peerTLSInfo transport.TLSInfo
+
+	// logging
+	debug        bool
+	logPkgLevels string
 
 	// unsafe
 	forceNewCluster bool
@@ -127,7 +137,6 @@ func NewConfig() *config {
 	fs := cfg.FlagSet
 	fs.Usage = func() {
 		fmt.Println(usageline)
-		fmt.Println(flagsline)
 	}
 
 	// member
@@ -149,7 +158,7 @@ func NewConfig() *config {
 	fs.Var(cfg.fallback, "discovery-fallback", fmt.Sprintf("Valid values include %s", strings.Join(cfg.fallback.Values, ", ")))
 	if err := cfg.fallback.Set(fallbackFlagProxy); err != nil {
 		// Should never happen.
-		log.Panicf("unexpected error setting up discovery-fallback flag: %v", err)
+		plog.Panicf("unexpected error setting up discovery-fallback flag: %v", err)
 	}
 	fs.StringVar(&cfg.dproxy, "discovery-proxy", "", "HTTP proxy to use for traffic to discovery service")
 	fs.StringVar(&cfg.dnsCluster, "discovery-srv", "", "DNS domain used to bootstrap initial cluster")
@@ -158,15 +167,20 @@ func NewConfig() *config {
 	fs.Var(cfg.clusterState, "initial-cluster-state", "Initial cluster configuration for bootstrapping")
 	if err := cfg.clusterState.Set(clusterStateFlagNew); err != nil {
 		// Should never happen.
-		log.Panicf("unexpected error setting up clusterStateFlag: %v", err)
+		plog.Panicf("unexpected error setting up clusterStateFlag: %v", err)
 	}
 
 	// proxy
 	fs.Var(cfg.proxy, "proxy", fmt.Sprintf("Valid values include %s", strings.Join(cfg.proxy.Values, ", ")))
 	if err := cfg.proxy.Set(proxyFlagOff); err != nil {
 		// Should never happen.
-		log.Panicf("unexpected error setting up proxyFlag: %v", err)
+		plog.Panicf("unexpected error setting up proxyFlag: %v", err)
 	}
+	fs.UintVar(&cfg.proxyFailureWaitMs, "proxy-failure-wait", 5000, "Time (in milliseconds) an endpoint will be held in a failed state.")
+	fs.UintVar(&cfg.proxyRefreshIntervalMs, "proxy-refresh-interval", 30000, "Time (in milliseconds) of the endpoints refresh interval.")
+	fs.UintVar(&cfg.proxyDialTimeoutMs, "proxy-dial-timeout", 1000, "Time (in milliseconds) for a dial to timeout.")
+	fs.UintVar(&cfg.proxyWriteTimeoutMs, "proxy-write-timeout", 5000, "Time (in milliseconds) for a write to timeout.")
+	fs.UintVar(&cfg.proxyReadTimeoutMs, "proxy-read-timeout", 0, "Time (in milliseconds) for a read to timeout.")
 
 	// security
 	fs.StringVar(&cfg.clientTLSInfo.CAFile, "ca-file", "", "DEPRECATED: Path to the client server TLS CA file.")
@@ -179,6 +193,10 @@ func NewConfig() *config {
 	fs.StringVar(&cfg.peerTLSInfo.KeyFile, "peer-key-file", "", "Path to the peer server TLS key file.")
 	fs.BoolVar(&cfg.peerTLSInfo.ClientCertAuth, "peer-client-cert-auth", false, "Enable peer client cert authentication.")
 	fs.StringVar(&cfg.peerTLSInfo.TrustedCAFile, "peer-trusted-ca-file", "", "Path to the peer server TLS trusted CA file.")
+
+	// logging
+	fs.BoolVar(&cfg.debug, "debug", false, "Enable debug output to the logs.")
+	fs.StringVar(&cfg.logPkgLevels, "log-package-levels", "", "Specify a particular log level for each etcd package.")
 
 	// unsafe
 	fs.BoolVar(&cfg.forceNewCluster, "force-new-cluster", false, "Force to create a new one member cluster")
@@ -206,6 +224,7 @@ func (cfg *config) Parse(arguments []string) error {
 	switch perr {
 	case nil:
 	case flag.ErrHelp:
+		fmt.Println(flagsline)
 		os.Exit(0)
 	default:
 		os.Exit(2)
@@ -215,13 +234,16 @@ func (cfg *config) Parse(arguments []string) error {
 	}
 
 	if cfg.printVersion {
-		fmt.Println("etcd version", version.Version)
+		fmt.Printf("etcd Version: %s\n", version.Version)
+		fmt.Printf("Git SHA: %s\n", version.GitSHA)
+		fmt.Printf("Go Version: %s\n", runtime.Version())
+		fmt.Printf("Go OS/Arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		os.Exit(0)
 	}
 
 	err := flags.SetFlagsFromEnv(cfg.FlagSet)
 	if err != nil {
-		log.Fatalf("etcd: %v", err)
+		plog.Fatalf("%v", err)
 	}
 
 	set := make(map[string]bool)
@@ -256,6 +278,16 @@ func (cfg *config) Parse(arguments []string) error {
 	cfg.acurls, err = flags.URLsFromFlags(cfg.FlagSet, "advertise-client-urls", "addr", cfg.clientTLSInfo)
 	if err != nil {
 		return err
+	}
+
+	// when etcd runs in member mode user needs to set -advertise-client-urls if -listen-client-urls is set.
+	// TODO(yichengq): check this for joining through discovery service case
+	mayFallbackToProxy := flags.IsSet(cfg.FlagSet, "discovery") && cfg.fallback.String() == fallbackFlagProxy
+	mayBeProxy := cfg.proxy.String() != proxyFlagOff || mayFallbackToProxy
+	if !mayBeProxy {
+		if flags.IsSet(cfg.FlagSet, "listen-client-urls") && !flags.IsSet(cfg.FlagSet, "advertise-client-urls") {
+			return errUnsetAdvertiseClientURLsFlag
+		}
 	}
 
 	if 5*cfg.TickMs > cfg.ElectionMs {

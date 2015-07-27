@@ -16,6 +16,7 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -60,6 +61,10 @@ func (e Error) Error() string {
 	return fmt.Sprintf("%v: %v (%v) [%v]", e.Code, e.Message, e.Cause, e.Index)
 }
 
+var (
+	ErrInvalidJSON = errors.New("client: response is invalid json. The endpoint is probably not valid etcd cluster endpoint.")
+)
+
 // PrevExistType is used to define an existence condition when setting
 // or deleting Nodes.
 type PrevExistType string
@@ -95,7 +100,8 @@ type KeysAPI interface {
 	Get(ctx context.Context, key string, opts *GetOptions) (*Response, error)
 
 	// Set assigns a new value to a Node identified by a given key. The caller
-	// may define a set of conditions in the SetOptions.
+	// may define a set of conditions in the SetOptions. If SetOptions.Dir=true
+	// than value is ignored.
 	Set(ctx context.Context, key, value string, opts *SetOptions) (*Response, error)
 
 	// Delete removes a Node identified by the given key, optionally destroying
@@ -151,6 +157,8 @@ type SetOptions struct {
 	// Leaving this field empty means that the caller wishes to
 	// ignore the current value of the Node. This cannot be used
 	// to compare the Node's current value to an empty string.
+	//
+	// PrevValue is ignored if Dir=true
 	PrevValue string
 
 	// PrevIndex indicates what the current ModifiedIndex of the
@@ -170,6 +178,9 @@ type SetOptions struct {
 	// that the zero-value is ignored, TTL cannot be used to set
 	// a TTL of 0.
 	TTL time.Duration
+
+	// Dir specifies whether or not this Node should be created as a directory.
+	Dir bool
 }
 
 type GetOptions struct {
@@ -183,6 +194,11 @@ type GetOptions struct {
 	// not be sorted and the ordering used should not be considered
 	// predictable.
 	Sort bool
+
+	// Quorum specifies whether it gets the latest committed value that
+	// has been applied in quorum of members, which ensures external
+	// consistency (or linearizability).
+	Quorum bool
 }
 
 type DeleteOptions struct {
@@ -206,6 +222,9 @@ type DeleteOptions struct {
 	// or explicitly set to false, only a single Node will be
 	// deleted.
 	Recursive bool
+
+	// Dir specifies whether or not this Node should be removed as a directory.
+	Dir bool
 }
 
 type Watcher interface {
@@ -274,6 +293,11 @@ func (n *Node) String() string {
 	return fmt.Sprintf("{Key: %s, CreatedIndex: %d, ModifiedIndex: %d, TTL: %d}", n.Key, n.CreatedIndex, n.ModifiedIndex, n.TTL)
 }
 
+// TTLDuration returns the Node's TTL as a time.Duration object
+func (n *Node) TTLDuration() time.Duration {
+	return time.Duration(n.TTL) * time.Second
+}
+
 type httpKeysAPI struct {
 	client httpClient
 	prefix string
@@ -291,6 +315,7 @@ func (k *httpKeysAPI) Set(ctx context.Context, key, val string, opts *SetOptions
 		act.PrevIndex = opts.PrevIndex
 		act.PrevExist = opts.PrevExist
 		act.TTL = opts.TTL
+		act.Dir = opts.Dir
 	}
 
 	resp, body, err := k.client.Do(ctx, act)
@@ -337,6 +362,7 @@ func (k *httpKeysAPI) Delete(ctx context.Context, key string, opts *DeleteOption
 	if opts != nil {
 		act.PrevValue = opts.PrevValue
 		act.PrevIndex = opts.PrevIndex
+		act.Dir = opts.Dir
 		act.Recursive = opts.Recursive
 	}
 
@@ -357,6 +383,7 @@ func (k *httpKeysAPI) Get(ctx context.Context, key string, opts *GetOptions) (*R
 	if opts != nil {
 		act.Recursive = opts.Recursive
 		act.Sorted = opts.Sort
+		act.Quorum = opts.Quorum
 	}
 
 	resp, body, err := k.client.Do(ctx, act)
@@ -421,6 +448,7 @@ type getAction struct {
 	Key       string
 	Recursive bool
 	Sorted    bool
+	Quorum    bool
 }
 
 func (g *getAction) HTTPRequest(ep url.URL) *http.Request {
@@ -429,6 +457,7 @@ func (g *getAction) HTTPRequest(ep url.URL) *http.Request {
 	params := u.Query()
 	params.Set("recursive", strconv.FormatBool(g.Recursive))
 	params.Set("sorted", strconv.FormatBool(g.Sorted))
+	params.Set("quorum", strconv.FormatBool(g.Quorum))
 	u.RawQuery = params.Encode()
 
 	req, _ := http.NewRequest("GET", u.String(), nil)
@@ -463,28 +492,38 @@ type setAction struct {
 	PrevIndex uint64
 	PrevExist PrevExistType
 	TTL       time.Duration
+	Dir       bool
 }
 
 func (a *setAction) HTTPRequest(ep url.URL) *http.Request {
 	u := v2KeysURL(ep, a.Prefix, a.Key)
 
 	params := u.Query()
-	if a.PrevValue != "" {
-		params.Set("prevValue", a.PrevValue)
+	form := url.Values{}
+
+	// we're either creating a directory or setting a key
+	if a.Dir {
+		params.Set("dir", strconv.FormatBool(a.Dir))
+	} else {
+		// These options are only valid for setting a key
+		if a.PrevValue != "" {
+			params.Set("prevValue", a.PrevValue)
+		}
+		form.Add("value", a.Value)
 	}
+
+	// Options which apply to both setting a key and creating a dir
 	if a.PrevIndex != 0 {
 		params.Set("prevIndex", strconv.FormatUint(a.PrevIndex, 10))
 	}
 	if a.PrevExist != PrevIgnore {
 		params.Set("prevExist", string(a.PrevExist))
 	}
-	u.RawQuery = params.Encode()
-
-	form := url.Values{}
-	form.Add("value", a.Value)
 	if a.TTL > 0 {
 		form.Add("ttl", strconv.FormatUint(uint64(a.TTL.Seconds()), 10))
 	}
+
+	u.RawQuery = params.Encode()
 	body := strings.NewReader(form.Encode())
 
 	req, _ := http.NewRequest("PUT", u.String(), body)
@@ -498,6 +537,7 @@ type deleteAction struct {
 	Key       string
 	PrevValue string
 	PrevIndex uint64
+	Dir       bool
 	Recursive bool
 }
 
@@ -510,6 +550,9 @@ func (a *deleteAction) HTTPRequest(ep url.URL) *http.Request {
 	}
 	if a.PrevIndex != 0 {
 		params.Set("prevIndex", strconv.FormatUint(a.PrevIndex, 10))
+	}
+	if a.Dir {
+		params.Set("dir", "true")
 	}
 	if a.Recursive {
 		params.Set("recursive", "true")
@@ -559,7 +602,7 @@ func unmarshalSuccessfulKeysResponse(header http.Header, body []byte) (*Response
 	var res Response
 	err := json.Unmarshal(body, &res)
 	if err != nil {
-		return nil, err
+		return nil, ErrInvalidJSON
 	}
 	if header.Get("X-Etcd-Index") != "" {
 		res.Index, err = strconv.ParseUint(header.Get("X-Etcd-Index"), 10, 64)
@@ -573,7 +616,7 @@ func unmarshalSuccessfulKeysResponse(header http.Header, body []byte) (*Response
 func unmarshalFailedKeysResponse(body []byte) error {
 	var etcdErr Error
 	if err := json.Unmarshal(body, &etcdErr); err != nil {
-		return err
+		return ErrInvalidJSON
 	}
 	return etcdErr
 }

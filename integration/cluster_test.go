@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +50,10 @@ const (
 
 var (
 	electionTicks = 10
+
+	// integration test uses well-known ports to listen for each running member,
+	// which ensures restarted member could listen on specific port again.
+	nextListenPort int64 = 20000
 )
 
 func init() {
@@ -209,6 +214,102 @@ func TestForceNewCluster(t *testing.T) {
 	clusterMustProgress(t, c.Members[:1])
 }
 
+func TestAddMemberAfterClusterFullRotation(t *testing.T) {
+	defer afterTest(t)
+	c := NewCluster(t, 3)
+	c.Launch(t)
+	defer c.Terminate(t)
+
+	// remove all the previous three members and add in three new members.
+	for i := 0; i < 3; i++ {
+		c.RemoveMember(t, uint64(c.Members[0].s.ID()))
+		c.waitLeader(t, c.Members)
+
+		c.AddMember(t)
+		c.waitLeader(t, c.Members)
+	}
+
+	c.AddMember(t)
+	c.waitLeader(t, c.Members)
+
+	clusterMustProgress(t, c.Members)
+}
+
+// Ensure we can remove a member then add a new one back immediately.
+func TestIssue2681(t *testing.T) {
+	defer afterTest(t)
+	c := NewCluster(t, 5)
+	c.Launch(t)
+	defer c.Terminate(t)
+
+	c.RemoveMember(t, uint64(c.Members[4].s.ID()))
+	c.waitLeader(t, c.Members)
+
+	c.AddMember(t)
+	c.waitLeader(t, c.Members)
+	clusterMustProgress(t, c.Members)
+}
+
+// Ensure we can remove a member after a snapshot then add a new one back.
+func TestIssue2746(t *testing.T) {
+	defer afterTest(t)
+	c := NewCluster(t, 5)
+
+	for _, m := range c.Members {
+		m.SnapCount = 10
+	}
+
+	c.Launch(t)
+	defer c.Terminate(t)
+
+	// force a snapshot
+	for i := 0; i < 20; i++ {
+		clusterMustProgress(t, c.Members)
+	}
+
+	c.RemoveMember(t, uint64(c.Members[4].s.ID()))
+	c.waitLeader(t, c.Members)
+
+	c.AddMember(t)
+	c.waitLeader(t, c.Members)
+	clusterMustProgress(t, c.Members)
+}
+
+// Ensure etcd will not panic when removing a just started member.
+func TestIssue2904(t *testing.T) {
+	defer afterTest(t)
+	// start 1-member cluster to ensure member 0 is the leader of the cluster.
+	c := NewCluster(t, 1)
+	c.Launch(t)
+	defer c.Terminate(t)
+
+	c.AddMember(t)
+	c.Members[1].Stop(t)
+
+	// send remove member-1 request to the cluster.
+	cc := mustNewHTTPClient(t, c.URLs())
+	ma := client.NewMembersAPI(cc)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	// the proposal is not committed because member 1 is stopped, but the
+	// proposal is appended to leader's raft log.
+	ma.Remove(ctx, c.Members[1].s.ID().String())
+	cancel()
+
+	// restart member, and expect it to send updateAttr request.
+	// the log in the leader is like this:
+	// [..., remove 1, ..., update attr 1, ...]
+	c.Members[1].Restart(t)
+	// when the member comes back, it ack the proposal to remove itself,
+	// and apply it.
+	<-c.Members[1].s.StopNotify()
+
+	// terminate removed member
+	c.Members[1].Terminate(t)
+	c.Members = c.Members[:1]
+	// wait member to be removed.
+	c.waitMembersMatch(t, c.HTTPMembers())
+}
+
 // clusterMustProgress ensures that cluster can make progress. It creates
 // a random key first, and check the new key could be got from all client urls
 // of the cluster.
@@ -240,7 +341,7 @@ type cluster struct {
 	Members []*member
 }
 
-func fillClusterForMembers(ms []*member, cName string) error {
+func fillClusterForMembers(ms []*member) error {
 	addrs := make([]string, 0)
 	for _, m := range ms {
 		scheme := "http"
@@ -254,7 +355,7 @@ func fillClusterForMembers(ms []*member, cName string) error {
 	clusterStr := strings.Join(addrs, ",")
 	var err error
 	for _, m := range ms {
-		m.Cluster, err = etcdserver.NewClusterFromString(cName, clusterStr)
+		m.InitialPeerURLsMap, err = types.NewURLsMap(clusterStr)
 		if err != nil {
 			return err
 		}
@@ -269,7 +370,7 @@ func newCluster(t *testing.T, size int, usePeerTLS bool) *cluster {
 		ms[i] = mustNewMember(t, c.name(i), usePeerTLS)
 	}
 	c.Members = ms
-	if err := fillClusterForMembers(c.Members, clusterName); err != nil {
+	if err := fillClusterForMembers(c.Members); err != nil {
 		t.Fatal(err)
 	}
 
@@ -323,6 +424,7 @@ func (c *cluster) Launch(t *testing.T) {
 	}
 	// wait cluster to be stable to receive future client requests
 	c.waitMembersMatch(t, c.HTTPMembers())
+	c.waitVersion()
 }
 
 func (c *cluster) URL(i int) string {
@@ -358,9 +460,7 @@ func (c *cluster) HTTPMembers() []client.Member {
 }
 
 func (c *cluster) addMember(t *testing.T, usePeerTLS bool) {
-	clusterStr := c.Members[0].Cluster.String()
-	idx := len(c.Members)
-	m := mustNewMember(t, c.name(idx), usePeerTLS)
+	m := mustNewMember(t, c.name(rand.Int()), usePeerTLS)
 	scheme := "http"
 	if usePeerTLS {
 		scheme = "https"
@@ -380,14 +480,11 @@ func (c *cluster) addMember(t *testing.T, usePeerTLS bool) {
 	members := append(c.HTTPMembers(), client.Member{PeerURLs: []string{peerURL}, ClientURLs: []string{}})
 	c.waitMembersMatch(t, members)
 
-	for _, ln := range m.PeerListeners {
-		clusterStr += fmt.Sprintf(",%s=%s://%s", m.Name, scheme, ln.Addr().String())
+	m.InitialPeerURLsMap = types.URLsMap{}
+	for _, mm := range c.Members {
+		m.InitialPeerURLsMap[mm.Name] = mm.PeerURLs
 	}
-	var err error
-	m.Cluster, err = etcdserver.NewClusterFromString(clusterName, clusterStr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	m.InitialPeerURLsMap[m.Name] = m.PeerURLs
 	m.NewCluster = false
 	if err := m.Launch(); err != nil {
 		t.Fatal(err)
@@ -407,7 +504,7 @@ func (c *cluster) AddTLSMember(t *testing.T) {
 
 func (c *cluster) RemoveMember(t *testing.T, id uint64) {
 	// send remove request to the cluster
-	cc := mustNewHTTPClient(t, []string{c.URL(0)})
+	cc := mustNewHTTPClient(t, c.URLs())
 	ma := client.NewMembersAPI(cc)
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	if err := ma.Remove(ctx, types.ID(id).String()); err != nil {
@@ -477,6 +574,17 @@ func (c *cluster) waitLeader(t *testing.T, membs []*member) {
 	}
 }
 
+func (c *cluster) waitVersion() {
+	for _, m := range c.Members {
+		for {
+			if m.s.ClusterVersion() != nil {
+				break
+			}
+			time.Sleep(tickDuration)
+		}
+	}
+}
+
 func (c *cluster) name(i int) string {
 	return fmt.Sprint("node", i)
 }
@@ -493,7 +601,8 @@ func isMembersEqual(membs []client.Member, wmembs []client.Member) bool {
 }
 
 func newLocalListener(t *testing.T) net.Listener {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	port := atomic.AddInt64(&nextListenPort, 1)
+	l, err := net.Listen("tcp", "127.0.0.1:"+strconv.FormatInt(port, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,10 +682,11 @@ func mustNewMember(t *testing.T, name string, usePeerTLS bool) *member {
 		t.Fatal(err)
 	}
 	clusterStr := fmt.Sprintf("%s=%s://%s", name, peerScheme, pln.Addr().String())
-	m.Cluster, err = etcdserver.NewClusterFromString(clusterName, clusterStr)
+	m.InitialPeerURLsMap, err = types.NewURLsMap(clusterStr)
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.InitialClusterToken = clusterName
 	m.NewCluster = true
 	m.Transport = mustNewTransport(t, m.PeerTLSInfo)
 	m.ElectionTicks = electionTicks
@@ -603,12 +713,13 @@ func (m *member) Clone(t *testing.T) *member {
 		// this should never fail
 		panic(err)
 	}
-	clusterStr := m.Cluster.String()
-	mm.Cluster, err = etcdserver.NewClusterFromString(clusterName, clusterStr)
+	clusterStr := m.InitialPeerURLsMap.String()
+	mm.InitialPeerURLsMap, err = types.NewURLsMap(clusterStr)
 	if err != nil {
 		// this should never fail
 		panic(err)
 	}
+	mm.InitialClusterToken = m.InitialClusterToken
 	mm.Transport = mustNewTransport(t, m.PeerTLSInfo)
 	mm.ElectionTicks = m.ElectionTicks
 	mm.PeerTLSInfo = m.PeerTLSInfo
@@ -625,7 +736,7 @@ func (m *member) Launch() error {
 	m.s.SyncTicker = time.Tick(500 * time.Millisecond)
 	m.s.Start()
 
-	m.raftHandler = &testutil.PauseableHandler{Next: etcdhttp.NewPeerHandler(m.s.Cluster, m.s, m.s.RaftHandler())}
+	m.raftHandler = &testutil.PauseableHandler{Next: etcdhttp.NewPeerHandler(m.s.Cluster(), m.s.RaftHandler())}
 
 	for _, ln := range m.PeerListeners {
 		hs := &httptest.Server{

@@ -6,6 +6,8 @@ etcd currently supports two proxy modes: `readwrite` and `readonly`. The default
 
 The proxy will shuffle the list of cluster members periodically to avoid sending all connections to a single member.
 
+The member list used by proxy consists of all client URLs advertised within the cluster, as specified in each members' `-advertise-client-urls` flag. If this flag is set incorrectly, requests sent to the proxy are forwarded to wrong addresses and then fail. The fix for this problem is to restart etcd member with correct `-advertise-client-urls` flag. After client URLs list in proxy is recalculated, which happens every 30 seconds, requests will be forwarded correctly.
+
 ### Using an etcd proxy
 To start etcd in proxy mode, you need to provide three flags: `proxy`, `listen-client-urls`, and `initial-cluster` (or `discovery`). 
 
@@ -16,7 +18,7 @@ The proxy will be listening on `listen-client-urls` and forward requests to the 
 #### Start an etcd proxy with a static configuration
 To start a proxy that will connect to a statically defined etcd cluster, specify the `initial-cluster` flag:
 ```
-etcd -proxy on -listen-client-urls 127.0.0.1:8080 -initial-cluster infra0=http://10.0.1.10:2380,infra1=http://10.0.1.11:2380,infra2=http://10.0.1.12:2380
+etcd -proxy on -listen-client-urls http://127.0.0.1:8080 -initial-cluster infra0=http://10.0.1.10:2380,infra1=http://10.0.1.11:2380,infra2=http://10.0.1.12:2380
 ```
 
 #### Start an etcd proxy with the discovery service
@@ -25,10 +27,10 @@ If you bootstrap an etcd cluster using the [discovery service][discovery-service
 To start a proxy using the discovery service, specify the `discovery` flag. The proxy will wait until the etcd cluster defined at the `discovery` url finishes bootstrapping, and then start to forward the requests. 
 
 ```
-etcd -proxy on -listen-client-urls 127.0.0.1:8080  -discovery https://discovery.etcd.io/3e86b59982e49066c5d813af1c2e2579cbf573de
+etcd -proxy on -listen-client-urls http://127.0.0.1:8080 -discovery https://discovery.etcd.io/3e86b59982e49066c5d813af1c2e2579cbf573de
 ```
 
 #### Fallback to proxy mode with discovery service
 If you bootstrap a etcd cluster using [discovery service][discovery-service] with more than the expected number of etcd members, the extra etcd processes will fall back to being `readwrite` proxies by default. They will forward the requests to the cluster as described above. For example, if you create a discovery url with `size=5`, and start ten etcd processes using that same discovery url, the result will be a cluster with five etcd members and five proxies. Note that this behaviour can be disabled with the `proxy-fallback` flag.
 
-[discovery-service]: https://github.com/coreos/etcd/blob/master/Documentation/clustering.md#discovery
+[discovery-service]: clustering.md#discovery

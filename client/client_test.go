@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/coreos/etcd/Godeps/_workspace/src/golang.org/x/net/context"
+	"github.com/coreos/etcd/pkg/testutil"
 )
 
 type actionAssertingHTTPClient struct {
@@ -113,10 +114,15 @@ func (t *fakeTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	case err := <-t.errchan:
 		return nil, err
 	case <-t.startCancel:
+		select {
+		// this simulates that the request is finished before cancel effects
+		case resp := <-t.respchan:
+			return resp, nil
 		// wait on finishCancel to simulate taking some amount of
 		// time while calling CancelRequest
-		<-t.finishCancel
-		return nil, errors.New("cancelled")
+		case <-t.finishCancel:
+			return nil, errors.New("cancelled")
+		}
 	}
 }
 
@@ -186,8 +192,11 @@ type checkableReadCloser struct {
 }
 
 func (c *checkableReadCloser) Close() error {
-	c.closed = true
-	return c.ReadCloser.Close()
+	if !c.closed {
+		c.closed = true
+		return c.ReadCloser.Close()
+	}
+	return nil
 }
 
 func TestSimpleHTTPClientDoCancelContextResponseBodyClosed(t *testing.T) {
@@ -200,12 +209,49 @@ func TestSimpleHTTPClientDoCancelContextResponseBodyClosed(t *testing.T) {
 
 	body := &checkableReadCloser{ReadCloser: ioutil.NopCloser(strings.NewReader("foo"))}
 	go func() {
-		// wait for CancelRequest to be called, informing us that simpleHTTPClient
-		// knows the context is already timed out
-		<-tr.startCancel
+		// wait that simpleHTTPClient knows the context is already timed out,
+		// and calls CancelRequest
+		testutil.WaitSchedule()
 
+		// response is returned before cancel effects
 		tr.respchan <- &http.Response{Body: body}
-		tr.finishCancel <- struct{}{}
+	}()
+
+	_, _, err := c.Do(ctx, &fakeAction{})
+	if err == nil {
+		t.Fatalf("expected non-nil error, got nil")
+	}
+
+	if !body.closed {
+		t.Fatalf("expected closed body")
+	}
+}
+
+type blockingBody struct {
+	c chan struct{}
+}
+
+func (bb *blockingBody) Read(p []byte) (n int, err error) {
+	<-bb.c
+	return 0, errors.New("closed")
+}
+
+func (bb *blockingBody) Close() error {
+	close(bb.c)
+	return nil
+}
+
+func TestSimpleHTTPClientDoCancelContextResponseBodyClosedWithBlockingBody(t *testing.T) {
+	tr := newFakeTransport()
+	c := &simpleHTTPClient{transport: tr}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &checkableReadCloser{ReadCloser: &blockingBody{c: make(chan struct{})}}
+	go func() {
+		tr.respchan <- &http.Response{Body: body}
+		time.Sleep(2 * time.Millisecond)
+		// cancel after the body is received
+		cancel()
 	}()
 
 	_, _, err := c.Do(ctx, &fakeAction{})

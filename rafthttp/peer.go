@@ -15,7 +15,6 @@
 package rafthttp
 
 import (
-	"log"
 	"net/http"
 	"time"
 
@@ -53,15 +52,6 @@ const (
 	pipelineMsg = "pipeline"
 )
 
-var (
-	bufSizeMap = map[string]int{
-		streamApp:   streamBufSize,
-		streamAppV2: streamBufSize,
-		streamMsg:   streamBufSize,
-		pipelineMsg: pipelineBufSize,
-	}
-)
-
 type Peer interface {
 	// Send sends the message to the remote peer. The function is non-blocking
 	// and has no promise that the message will be received by the remote.
@@ -70,6 +60,8 @@ type Peer interface {
 	Send(m raftpb.Message)
 	// Update updates the urls of remote peer.
 	Update(urls types.URLs)
+	// setTerm sets the term of ongoing communication.
+	setTerm(term uint64)
 	// attachOutgoingConn attachs the outgoing connection to the peer for
 	// stream usage. After the call, the ownership of the outgoing
 	// connection hands over to the peer. The peer will close the connection
@@ -99,11 +91,13 @@ type peer struct {
 	msgAppWriter *streamWriter
 	writer       *streamWriter
 	pipeline     *pipeline
+	msgAppReader *streamReader
 
 	sendc    chan raftpb.Message
 	recvc    chan raftpb.Message
 	propc    chan raftpb.Message
 	newURLsC chan types.URLs
+	termc    chan uint64
 
 	// for testing
 	pausec  chan struct{}
@@ -113,18 +107,20 @@ type peer struct {
 	done  chan struct{}
 }
 
-func startPeer(tr http.RoundTripper, urls types.URLs, local, to, cid types.ID, r Raft, fs *stats.FollowerStats, errorc chan error) *peer {
+func startPeer(tr http.RoundTripper, urls types.URLs, local, to, cid types.ID, r Raft, fs *stats.FollowerStats, errorc chan error, term uint64) *peer {
 	picker := newURLPicker(urls)
+	status := newPeerStatus(to)
 	p := &peer{
 		id:           to,
 		r:            r,
-		msgAppWriter: startStreamWriter(to, fs, r),
-		writer:       startStreamWriter(to, fs, r),
-		pipeline:     newPipeline(tr, picker, to, cid, fs, r, errorc),
+		msgAppWriter: startStreamWriter(to, status, fs, r),
+		writer:       startStreamWriter(to, status, fs, r),
+		pipeline:     newPipeline(tr, picker, local, to, cid, status, fs, r, errorc),
 		sendc:        make(chan raftpb.Message),
 		recvc:        make(chan raftpb.Message, recvBufSize),
 		propc:        make(chan raftpb.Message, maxPendingProposals),
 		newURLsC:     make(chan types.URLs),
+		termc:        make(chan uint64),
 		pausec:       make(chan struct{}),
 		resumec:      make(chan struct{}),
 		stopc:        make(chan struct{}),
@@ -139,7 +135,7 @@ func startPeer(tr http.RoundTripper, urls types.URLs, local, to, cid types.ID, r
 			select {
 			case mm := <-p.propc:
 				if err := r.Process(ctx, mm); err != nil {
-					log.Printf("peer: process raft message error: %v", err)
+					plog.Warningf("failed to process raft message (%v)", err)
 				}
 			case <-p.stopc:
 				return
@@ -147,10 +143,10 @@ func startPeer(tr http.RoundTripper, urls types.URLs, local, to, cid types.ID, r
 		}
 	}()
 
+	p.msgAppReader = startStreamReader(tr, picker, streamTypeMsgAppV2, local, to, cid, status, p.recvc, p.propc, errorc, term)
+	reader := startStreamReader(tr, picker, streamTypeMessage, local, to, cid, status, p.recvc, p.propc, errorc, term)
 	go func() {
 		var paused bool
-		msgAppReader := startStreamReader(tr, picker, streamTypeMsgAppV2, local, to, cid, p.recvc, p.propc)
-		reader := startStreamReader(tr, picker, streamTypeMessage, local, to, cid, p.recvc, p.propc)
 		for {
 			select {
 			case m := <-p.sendc:
@@ -165,15 +161,15 @@ func startPeer(tr http.RoundTripper, urls types.URLs, local, to, cid types.ID, r
 					if isMsgSnap(m) {
 						p.r.ReportSnapshot(m.To, raft.SnapshotFailure)
 					}
-					log.Printf("peer: dropping %s to %s since %s with %d-size buffer is blocked",
-						m.Type, p.id, name, bufSizeMap[name])
+					if status.isActive() {
+						plog.Warningf("dropped %s to %s since %s's sending buffer is full", m.Type, p.id, name)
+					} else {
+						plog.Debugf("dropped %s to %s since %s's sending buffer is full", m.Type, p.id, name)
+					}
 				}
 			case mm := <-p.recvc:
-				if mm.Type == raftpb.MsgApp {
-					msgAppReader.updateMsgAppTerm(mm.Term)
-				}
 				if err := r.Process(context.TODO(), mm); err != nil {
-					log.Printf("peer: process raft message error: %v", err)
+					plog.Warningf("failed to process raft message (%v)", err)
 				}
 			case urls := <-p.newURLsC:
 				picker.update(urls)
@@ -186,7 +182,7 @@ func startPeer(tr http.RoundTripper, urls types.URLs, local, to, cid types.ID, r
 				p.msgAppWriter.stop()
 				p.writer.stop()
 				p.pipeline.stop()
-				msgAppReader.stop()
+				p.msgAppReader.stop()
 				reader.stop()
 				close(p.done)
 				return
@@ -211,6 +207,8 @@ func (p *peer) Update(urls types.URLs) {
 	}
 }
 
+func (p *peer) setTerm(term uint64) { p.msgAppReader.updateMsgAppTerm(term) }
+
 func (p *peer) attachOutgoingConn(conn *outgoingConn) {
 	var ok bool
 	switch conn.t {
@@ -219,7 +217,7 @@ func (p *peer) attachOutgoingConn(conn *outgoingConn) {
 	case streamTypeMessage:
 		ok = p.writer.attach(conn)
 	default:
-		log.Panicf("rafthttp: unhandled stream type %s", conn.t)
+		plog.Panicf("unhandled stream type %s", conn.t)
 	}
 	if !ok {
 		conn.Close()

@@ -17,17 +17,20 @@ package rafthttp
 import (
 	"fmt"
 	"io"
-	"log"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/coreos/etcd/Godeps/_workspace/src/github.com/coreos/go-semver/semver"
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/coreos/etcd/version"
 )
 
 const (
@@ -36,6 +39,16 @@ const (
 	streamTypeMsgApp   streamType = "msgapp"
 
 	streamBufSize = 4096
+)
+
+var (
+	errUnsupportedStreamType = fmt.Errorf("unsupported stream type")
+
+	// the key is in string format "major.minor.patch"
+	supportedStream = map[string][]streamType{
+		"2.0.0": []streamType{streamTypeMsgApp},
+		"2.1.0": []streamType{streamTypeMsgApp, streamTypeMsgAppV2, streamTypeMessage},
+	}
 )
 
 type streamType string
@@ -49,8 +62,21 @@ func (t streamType) endpoint() string {
 	case streamTypeMessage:
 		return path.Join(RaftStreamPrefix, "message")
 	default:
-		log.Panicf("rafthttp: unhandled stream type %v", t)
+		plog.Panicf("unhandled stream type %v", t)
 		return ""
+	}
+}
+
+func (t streamType) String() string {
+	switch t {
+	case streamTypeMsgApp:
+		return "stream MsgApp"
+	case streamTypeMsgAppV2:
+		return "stream MsgApp v2"
+	case streamTypeMessage:
+		return "stream Message"
+	default:
+		return "unknown stream"
 	}
 }
 
@@ -76,9 +102,10 @@ type outgoingConn struct {
 // streamWriter is a long-running go-routine that writes messages into the
 // attached outgoingConn.
 type streamWriter struct {
-	id types.ID
-	fs *stats.FollowerStats
-	r  Raft
+	id     types.ID
+	status *peerStatus
+	fs     *stats.FollowerStats
+	r      Raft
 
 	mu      sync.Mutex // guard field working and closer
 	closer  io.Closer
@@ -90,15 +117,16 @@ type streamWriter struct {
 	done  chan struct{}
 }
 
-func startStreamWriter(id types.ID, fs *stats.FollowerStats, r Raft) *streamWriter {
+func startStreamWriter(id types.ID, status *peerStatus, fs *stats.FollowerStats, r Raft) *streamWriter {
 	w := &streamWriter{
-		id:    id,
-		fs:    fs,
-		r:     r,
-		msgc:  make(chan raftpb.Message, streamBufSize),
-		connc: make(chan *outgoingConn),
-		stopc: make(chan struct{}),
-		done:  make(chan struct{}),
+		id:     id,
+		status: status,
+		fs:     fs,
+		r:      r,
+		msgc:   make(chan raftpb.Message, streamBufSize),
+		connc:  make(chan *outgoingConn),
+		stopc:  make(chan struct{}),
+		done:   make(chan struct{}),
 	}
 	go w.run()
 	return w
@@ -120,8 +148,8 @@ func (cw *streamWriter) run() {
 			if err := enc.encode(linkHeartbeatMessage); err != nil {
 				reportSentFailure(string(t), linkHeartbeatMessage)
 
-				log.Printf("rafthttp: failed to heartbeat on stream %s due to %v. waiting for a new stream to be established.", t, err)
-				cw.resetCloser()
+				cw.status.deactivate(failureType{source: t.String(), action: "heartbeat"}, err.Error())
+				cw.close()
 				heartbeatc, msgc = nil, nil
 				continue
 			}
@@ -131,7 +159,7 @@ func (cw *streamWriter) run() {
 			if t == streamTypeMsgApp && m.Term != msgAppTerm {
 				// TODO: reasonable retry logic
 				if m.Term > msgAppTerm {
-					cw.resetCloser()
+					cw.close()
 					heartbeatc, msgc = nil, nil
 					// TODO: report to raft at peer level
 					cw.r.ReportUnreachable(m.To)
@@ -142,8 +170,8 @@ func (cw *streamWriter) run() {
 			if err := enc.encode(m); err != nil {
 				reportSentFailure(string(t), m)
 
-				log.Printf("rafthttp: failed to send message on stream %s due to %v. waiting for a new stream to be established.", t, err)
-				cw.resetCloser()
+				cw.status.deactivate(failureType{source: t.String(), action: "write"}, err.Error())
+				cw.close()
 				heartbeatc, msgc = nil, nil
 				cw.r.ReportUnreachable(m.To)
 				continue
@@ -151,31 +179,32 @@ func (cw *streamWriter) run() {
 			flusher.Flush()
 			reportSentDuration(string(t), m, time.Since(start))
 		case conn := <-cw.connc:
-			cw.resetCloser()
+			cw.close()
 			t = conn.t
 			switch conn.t {
 			case streamTypeMsgApp:
 				var err error
 				msgAppTerm, err = strconv.ParseUint(conn.termStr, 10, 64)
 				if err != nil {
-					log.Panicf("rafthttp: unexpected parse term %s error: %v", conn.termStr, err)
+					plog.Panicf("could not parse term %s to uint (%v)", conn.termStr, err)
 				}
 				enc = &msgAppEncoder{w: conn.Writer, fs: cw.fs}
 			case streamTypeMsgAppV2:
-				enc = &msgAppV2Encoder{w: conn.Writer, fs: cw.fs}
+				enc = newMsgAppV2Encoder(conn.Writer, cw.fs)
 			case streamTypeMessage:
 				enc = &messageEncoder{w: conn.Writer}
 			default:
-				log.Panicf("rafthttp: unhandled stream type %s", conn.t)
+				plog.Panicf("unhandled stream type %s", conn.t)
 			}
 			flusher = conn.Flusher
 			cw.mu.Lock()
+			cw.status.activate()
 			cw.closer = conn.Closer
 			cw.working = true
 			cw.mu.Unlock()
 			heartbeatc, msgc = tickc, cw.msgc
 		case <-cw.stopc:
-			cw.resetCloser()
+			cw.close()
 			close(cw.done)
 			return
 		}
@@ -188,7 +217,7 @@ func (cw *streamWriter) writec() (chan<- raftpb.Message, bool) {
 	return cw.msgc, cw.working
 }
 
-func (cw *streamWriter) resetCloser() {
+func (cw *streamWriter) close() {
 	cw.mu.Lock()
 	defer cw.mu.Unlock()
 	if !cw.working {
@@ -219,13 +248,15 @@ func (cw *streamWriter) stop() {
 // streamReader is a long-running go-routine that dials to the remote stream
 // endponit and reads messages from the response body returned.
 type streamReader struct {
-	tr       http.RoundTripper
-	picker   *urlPicker
-	t        streamType
-	from, to types.ID
-	cid      types.ID
-	recvc    chan<- raftpb.Message
-	propc    chan<- raftpb.Message
+	tr            http.RoundTripper
+	picker        *urlPicker
+	t             streamType
+	local, remote types.ID
+	cid           types.ID
+	status        *peerStatus
+	recvc         chan<- raftpb.Message
+	propc         chan<- raftpb.Message
+	errorc        chan<- error
 
 	mu         sync.Mutex
 	msgAppTerm uint64
@@ -235,18 +266,21 @@ type streamReader struct {
 	done       chan struct{}
 }
 
-func startStreamReader(tr http.RoundTripper, picker *urlPicker, t streamType, from, to, cid types.ID, recvc chan<- raftpb.Message, propc chan<- raftpb.Message) *streamReader {
+func startStreamReader(tr http.RoundTripper, picker *urlPicker, t streamType, local, remote, cid types.ID, status *peerStatus, recvc chan<- raftpb.Message, propc chan<- raftpb.Message, errorc chan<- error, term uint64) *streamReader {
 	r := &streamReader{
-		tr:     tr,
-		picker: picker,
-		t:      t,
-		from:   from,
-		to:     to,
-		cid:    cid,
-		recvc:  recvc,
-		propc:  propc,
-		stopc:  make(chan struct{}),
-		done:   make(chan struct{}),
+		tr:         tr,
+		picker:     picker,
+		t:          t,
+		local:      local,
+		remote:     remote,
+		cid:        cid,
+		status:     status,
+		recvc:      recvc,
+		propc:      propc,
+		errorc:     errorc,
+		msgAppTerm: term,
+		stopc:      make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	go r.run()
 	return r
@@ -254,13 +288,31 @@ func startStreamReader(tr http.RoundTripper, picker *urlPicker, t streamType, fr
 
 func (cr *streamReader) run() {
 	for {
-		rc, err := cr.dial()
+		t := cr.t
+		rc, err := cr.dial(t)
+		// downgrade to streamTypeMsgApp if the remote doesn't support
+		// streamTypeMsgAppV2
+		if t == streamTypeMsgAppV2 && err == errUnsupportedStreamType {
+			t = streamTypeMsgApp
+			rc, err = cr.dial(t)
+		}
 		if err != nil {
-			log.Printf("rafthttp: roundtripping error: %v", err)
+			if err != errUnsupportedStreamType {
+				cr.status.deactivate(failureType{source: t.String(), action: "dial"}, err.Error())
+			}
 		} else {
-			err := cr.decodeLoop(rc)
-			if err != io.EOF && !isClosedConnectionError(err) {
-				log.Printf("rafthttp: failed to read message on stream %s due to %v", cr.t, err)
+			cr.status.activate()
+			err := cr.decodeLoop(rc, t)
+			switch {
+			// all data is read out
+			case err == io.EOF:
+			// connection is closed by the remote
+			case isClosedConnectionError(err):
+			// stream msgapp is only used for etcd 2.0, and etcd 2.0 doesn't
+			// heartbeat on the idle stream, so it is expected to time out.
+			case t == streamTypeMsgApp && isNetworkTimeoutError(err):
+			default:
+				cr.status.deactivate(failureType{source: t.String(), action: "read"}, err.Error())
 			}
 		}
 		select {
@@ -274,18 +326,18 @@ func (cr *streamReader) run() {
 	}
 }
 
-func (cr *streamReader) decodeLoop(rc io.ReadCloser) error {
+func (cr *streamReader) decodeLoop(rc io.ReadCloser, t streamType) error {
 	var dec decoder
 	cr.mu.Lock()
-	switch cr.t {
+	switch t {
 	case streamTypeMsgApp:
-		dec = &msgAppDecoder{r: rc, local: cr.from, remote: cr.to, term: cr.msgAppTerm}
+		dec = &msgAppDecoder{r: rc, local: cr.local, remote: cr.remote, term: cr.msgAppTerm}
 	case streamTypeMsgAppV2:
-		dec = &msgAppV2Decoder{r: rc, local: cr.from, remote: cr.to}
+		dec = newMsgAppV2Decoder(rc, cr.local, cr.remote)
 	case streamTypeMessage:
 		dec = &messageDecoder{r: rc}
 	default:
-		log.Panicf("rafthttp: unhandled stream type %s", cr.t)
+		plog.Panicf("unhandled stream type %s", t)
 	}
 	cr.closer = rc
 	cr.mu.Unlock()
@@ -295,7 +347,7 @@ func (cr *streamReader) decodeLoop(rc io.ReadCloser) error {
 		switch {
 		case err != nil:
 			cr.mu.Lock()
-			cr.resetCloser()
+			cr.close()
 			cr.mu.Unlock()
 			return err
 		case isLinkHeartbeatMessage(m):
@@ -308,21 +360,28 @@ func (cr *streamReader) decodeLoop(rc io.ReadCloser) error {
 			select {
 			case recvc <- m:
 			default:
-				log.Printf("rafthttp: dropping %s from %x because receive buffer is blocked",
-					m.Type, m.From)
+				if cr.status.isActive() {
+					plog.Warningf("dropped %s from %s since receiving buffer is full", m.Type, types.ID(m.From))
+				} else {
+					plog.Debugf("dropped %s from %s since receiving buffer is full", m.Type, types.ID(m.From))
+				}
 			}
 		}
 	}
 }
 
+// updateMsgAppTerm updates the term for MsgApp stream, and closes
+// the existing MsgApp stream if term is updated.
 func (cr *streamReader) updateMsgAppTerm(term uint64) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
-	if cr.msgAppTerm == term {
+	if cr.msgAppTerm >= term {
 		return
 	}
 	cr.msgAppTerm = term
-	cr.resetCloser()
+	if cr.t == streamTypeMsgApp {
+		cr.close()
+	}
 }
 
 // TODO: always cancel in-flight dial and decode
@@ -330,7 +389,7 @@ func (cr *streamReader) stop() {
 	close(cr.stopc)
 	cr.mu.Lock()
 	cr.cancelRequest()
-	cr.resetCloser()
+	cr.close()
 	cr.mu.Unlock()
 	<-cr.done
 }
@@ -341,37 +400,83 @@ func (cr *streamReader) isWorking() bool {
 	return cr.closer != nil
 }
 
-func (cr *streamReader) dial() (io.ReadCloser, error) {
+func (cr *streamReader) dial(t streamType) (io.ReadCloser, error) {
 	u := cr.picker.pick()
 	cr.mu.Lock()
 	term := cr.msgAppTerm
 	cr.mu.Unlock()
 
 	uu := u
-	uu.Path = path.Join(cr.t.endpoint(), cr.from.String())
+	uu.Path = path.Join(t.endpoint(), cr.local.String())
+
 	req, err := http.NewRequest("GET", uu.String(), nil)
 	if err != nil {
 		cr.picker.unreachable(u)
-		return nil, fmt.Errorf("new request to %s error: %v", u, err)
+		return nil, fmt.Errorf("failed to make http request to %s (%v)", u, err)
 	}
+	req.Header.Set("X-Server-From", cr.local.String())
+	req.Header.Set("X-Server-Version", version.Version)
+	req.Header.Set("X-Min-Cluster-Version", version.MinClusterVersion)
 	req.Header.Set("X-Etcd-Cluster-ID", cr.cid.String())
-	req.Header.Set("X-Raft-To", cr.to.String())
-	if cr.t == streamTypeMsgApp {
+	req.Header.Set("X-Raft-To", cr.remote.String())
+	if t == streamTypeMsgApp {
 		req.Header.Set("X-Raft-Term", strconv.FormatUint(term, 10))
 	}
+
 	cr.mu.Lock()
 	cr.req = req
 	cr.mu.Unlock()
+
 	resp, err := cr.tr.RoundTrip(req)
 	if err != nil {
 		cr.picker.unreachable(u)
-		return nil, fmt.Errorf("error roundtripping to %s: %v", req.URL, err)
+		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
+
+	rv := serverVersion(resp.Header)
+	lv := semver.Must(semver.NewVersion(version.Version))
+	if compareMajorMinorVersion(rv, lv) == -1 && !checkStreamSupport(rv, t) {
+		resp.Body.Close()
+		return nil, errUnsupportedStreamType
+	}
+
+	switch resp.StatusCode {
+	case http.StatusGone:
+		resp.Body.Close()
+		err := fmt.Errorf("the member has been permanently removed from the cluster")
+		select {
+		case cr.errorc <- err:
+		default:
+		}
+		return nil, err
+	case http.StatusOK:
+		return resp.Body, nil
+	case http.StatusNotFound:
+		resp.Body.Close()
+		return nil, fmt.Errorf("remote member %s could not recognize local member", cr.remote)
+	case http.StatusPreconditionFailed:
+		b, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			cr.picker.unreachable(u)
+			return nil, err
+		}
+		resp.Body.Close()
+
+		switch strings.TrimSuffix(string(b), "\n") {
+		case errIncompatibleVersion.Error():
+			plog.Errorf("request sent was ignored by peer %s (server version incompatible)", cr.remote)
+			return nil, errIncompatibleVersion
+		case errClusterIDMismatch.Error():
+			plog.Errorf("request sent was ignored (cluster ID mismatch: remote[%s]=%s, local=%s)",
+				cr.remote, resp.Header.Get("X-Etcd-Cluster-ID"), cr.cid)
+			return nil, errClusterIDMismatch
+		default:
+			return nil, fmt.Errorf("unhandled error %q when precondition failed", string(b))
+		}
+	default:
 		resp.Body.Close()
 		return nil, fmt.Errorf("unhandled http status %d", resp.StatusCode)
 	}
-	return resp.Body, nil
 }
 
 func (cr *streamReader) cancelRequest() {
@@ -380,7 +485,7 @@ func (cr *streamReader) cancelRequest() {
 	}
 }
 
-func (cr *streamReader) resetCloser() {
+func (cr *streamReader) close() {
 	if cr.closer != nil {
 		cr.closer.Close()
 	}
@@ -394,4 +499,21 @@ func canUseMsgAppStream(m raftpb.Message) bool {
 func isClosedConnectionError(err error) bool {
 	operr, ok := err.(*net.OpError)
 	return ok && operr.Err.Error() == "use of closed network connection"
+}
+
+// checkStreamSupport checks whether the stream type is supported in the
+// given version.
+func checkStreamSupport(v *semver.Version, t streamType) bool {
+	nv := &semver.Version{Major: v.Major, Minor: v.Minor}
+	for _, s := range supportedStream[nv.String()] {
+		if s == t {
+			return true
+		}
+	}
+	return false
+}
+
+func isNetworkTimeoutError(err error) bool {
+	nerr, ok := err.(net.Error)
+	return ok && nerr.Timeout()
 }
